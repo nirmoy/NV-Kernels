@@ -1,3 +1,9 @@
+linux-meta-nvidia-adv (6.8.0-1006.6) noble; urgency=medium
+
+  * linux-meta-nvidia-adv version: 6.8.0-1006.6
+
+ -- Brad Figg <bfigg@nvidia.com>  Wed, 04 Dec 2024 09:04:29 -0800
+
 linux-meta-nvidia-adv (6.8.0-1005.5) noble; urgency=medium
 
   * [Packaging] drop modules-extra packages from dependencies
