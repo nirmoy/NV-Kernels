@@ -1,3 +1,9 @@
+linux-meta-nvidia-adv-6.11 (6.11.0-2001.1) noble; urgency=medium
+
+  * linux-meta-nvidia-adv-6.11 version: 6.11.0-2001.1
+
+ -- Brad Figg <bfigg@nvidia.com>  Tue, 17 Dec 2024 20:46:17 -0800
+
 linux-meta-nvidia-adv-6.11 (6.11.0-2000.0) noble; urgency=medium
 
   * Initialize meta for noble:linux-nvidia-adv-6.11.
