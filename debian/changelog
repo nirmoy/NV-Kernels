@@ -1,3 +1,9 @@
+linux-meta-nvidia-internal-6.11 (6.11.0-3000.0) noble; urgency=medium
+
+  * linux-meta-nvidia-internal-6.11 version: 6.11.0-3000.0
+
+ -- Brad Figg <bfigg@nvidia.com>  Wed, 18 Dec 2024 19:18:17 -0800
+
 linux-meta-nvidia-adv-6.11 (6.11.0-2001.1) noble; urgency=medium
 
   * linux-meta-nvidia-adv-6.11 version: 6.11.0-2001.1
