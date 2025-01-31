@@ -1,3 +1,9 @@
+linux-meta-nvidia-adv (6.8.0-1007.7) noble; urgency=medium
+
+  * linux-meta-nvidia-adv version: 6.8.0-1007.7
+
+ -- Brad Figg <bfigg@nvidia.com>  Fri, 31 Jan 2025 11:39:18 -0800
+
 linux-meta-nvidia-adv (6.8.0-1006.6) noble; urgency=medium
 
   * linux-meta-nvidia-adv version: 6.8.0-1006.6
