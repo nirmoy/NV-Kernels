@@ -308,7 +308,7 @@ def do_check(args):
             policy = a.config[conf] if conf in a.config else "undefined"
             if "policy" in policy:
                 policy = f"policy<{policy['policy']}>"
-            print(f"check-config: {conf} changed from {expected} to {value}: {policy})")
+            print(f"check-config: {conf} annotation is: '{expected}'   config is: '{value}':     {policy}")
             ret = 1
         else:
             good += 1
