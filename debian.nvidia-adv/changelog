@@ -1,4 +1,10 @@
-linux-nvidia-adv (6.8.0-1007.7+11) noble; urgency=medium
+linux-nvidia-adv (6.8.0-1009.9) noble; urgency=medium
+
+  - NVIDIA: [Config] CONFIG_GCC_ASM_GOTO_OUTPUT_WORKAROUND annotations change 'amd64': '-', 'arm64: '-'
+
+ -- Brad Figg <bfigg@nvidia.com>  Thu, 06 Feb 2025 03:58:17 -0800
+
+linux-nvidia-adv (6.8.0-1007.7) noble; urgency=medium
 
   * Miscellaneous upstream changes
     - vfio/pci: Properly hide first-in-list PCIe extended capability
