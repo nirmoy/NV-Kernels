@@ -392,7 +392,7 @@ static int shmem_cppc_enable(bool enable)
 		if (cppc_state == AMD_PSTATE_ACTIVE) {
 			/* Set desired perf as zero to allow EPP firmware control */
 			perf_ctrls.desired_perf = 0;
-			ret = cppc_set_perf(cpu, &perf_ctrls);
+			ret = cppc_set_perf_ctrls(cpu, &perf_ctrls);
 			if (ret)
 				return ret;
 		}
@@ -495,7 +495,7 @@ static int shmem_update_perf(struct amd_cpudata *cpudata, u32 min_perf,
 	perf_ctrls.min_perf = min_perf;
 	perf_ctrls.desired_perf = des_perf;
 
-	return cppc_set_perf(cpudata->cpu, &perf_ctrls);
+	return cppc_set_perf_ctrls(cpudata->cpu, &perf_ctrls);
 }
 
 static inline bool amd_pstate_sample(struct amd_cpudata *cpudata)
@@ -1633,6 +1633,35 @@ static int amd_pstate_epp_cpu_online(struct cpufreq_policy *policy)
 	cpudata->suspended = false;
 
 	return 0;
+}
+
+static void amd_pstate_epp_offline(struct cpufreq_policy *policy)
+{
+	struct amd_cpudata *cpudata = policy->driver_data;
+	struct cppc_perf_ctrls perf_ctrls;
+	int min_perf;
+	u64 value;
+
+	min_perf = READ_ONCE(cpudata->lowest_perf);
+	value = READ_ONCE(cpudata->cppc_req_cached);
+
+	mutex_lock(&amd_pstate_limits_lock);
+	if (cpu_feature_enabled(X86_FEATURE_CPPC)) {
+		cpudata->epp_policy = CPUFREQ_POLICY_UNKNOWN;
+
+		/* Set max perf same as min perf */
+		value &= ~AMD_CPPC_MAX_PERF(~0L);
+		value |= AMD_CPPC_MAX_PERF(min_perf);
+		value &= ~AMD_CPPC_MIN_PERF(~0L);
+		value |= AMD_CPPC_MIN_PERF(min_perf);
+		wrmsrl_on_cpu(cpudata->cpu, MSR_AMD_CPPC_REQ, value);
+	} else {
+		perf_ctrls.desired_perf = 0;
+		perf_ctrls.max_perf = min_perf;
+		perf_ctrls.energy_perf = AMD_CPPC_ENERGY_PERF_PREF(HWP_EPP_BALANCE_POWERSAVE);
+		cppc_set_perf_ctrls(cpudata->cpu, &perf_ctrls);
+	}
+	mutex_unlock(&amd_pstate_limits_lock);
 }
 
 static int amd_pstate_epp_cpu_offline(struct cpufreq_policy *policy)
