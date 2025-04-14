@@ -1,3 +1,13 @@
+linux-meta-nvidia-adv-6.11 (6.11.0-2002.2) noble; urgency=medium
+
+  * Main version: 6.11.0-2002.2
+
+  * Packaging resync (LP: #1786013)
+    - [Packaging] update variants
+    - [Packaging] debian/dkms-versions -- resync from main package
+
+ -- Ian May <ianm@nvidia.com>  Mon, 14 Apr 2025 13:01:13 -0700
+
 linux-meta-nvidia-adv-6.11 (6.11.0-2001.1) noble; urgency=medium
 
   * linux-meta-nvidia-adv-6.11 version: 6.11.0-2001.1
