@@ -32,4 +32,9 @@ chmod +x 'debian/tests-build/check-aliases'
 chmod +x 'debian/tests/rebuild'
 chmod +x 'debian/tests/ubuntu-regression-suite'
 # Remove any files deleted from the orig.
+rm -f 'Documentation/arch/x86/resctrl.rst'
+rm -f 'arch/x86/kernel/cpu/resctrl/trace.h'
+rm -f 'drivers/iommu/iommufd/fault.c'
+rm -f 'drivers/platform/arm64/acer-aspire1-ec.c'
+rm -f 'drivers/platform/arm64/lenovo-yoga-c630.c'
 exit 0
