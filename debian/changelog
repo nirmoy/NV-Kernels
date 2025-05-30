@@ -1,3 +1,9 @@
+linux-meta-nvidia-adv-6.11 (6.11.0-2003.3) noble; urgency=medium
+
+  * Main version: 6.11.0-2003.3
+
+ -- Ian May <ianm@nvidia.com>  Fri, 30 May 2025 09:47:08 -0700
+
 linux-meta-nvidia-adv-6.11 (6.11.0-2002.2) noble; urgency=medium
 
   * Main version: 6.11.0-2002.2
