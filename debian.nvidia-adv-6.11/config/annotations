@@ -183,11 +183,6 @@ CONFIG_CC_HAS_KASAN_SW_TAGS                     policy<{'amd64': '-', 'arm64': '
 CONFIG_CC_HAS_MIN_FUNCTION_ALIGNMENT            policy<{'amd64': '-', 'arm64': '-'}>
 CONFIG_CC_HAS_SANE_FUNCTION_ALIGNMENT           policy<{'amd64': '-', 'arm64': '-'}>
 CONFIG_CC_VERSION_TEXT                          policy<{'amd64': '"x86_64-linux-gnu-gcc-13 (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0"', 'arm64': '"aarch64-linux-gnu-gcc-13 (Ubuntu 13.3.0-6ubuntu2~24.04) 13.3.0"'}>
-CONFIG_CPUFREQ_ARCH_CUR_FREQ                    policy<{'amd64': 'y'}>
-CONFIG_GCC_ASM_GOTO_OUTPUT_BROKEN               policy<{'amd64': '-', 'arm64': '-'}>
-CONFIG_GCC_VERSION                              policy<{'amd64': '130300', 'arm64': '130300'}>
-CONFIG_IOMMUFD_DRIVER_CORE                      policy<{'amd64': 'y', 'arm64': 'y'}>
-CONFIG_IOMMUFD_VFIO_CONTAINER                   policy<{'arm64': 'y'}>
 CONFIG_CGROUP_RESCTRL                           policy<{'amd64': 'n', 'arm64': 'n'}>
 CONFIG_CPUFREQ_ARCH_CUR_FREQ                    policy<{'amd64': 'y'}>
 CONFIG_GCC_ASM_GOTO_OUTPUT_BROKEN               policy<{'amd64': '-', 'arm64': '-'}>
@@ -198,8 +193,8 @@ CONFIG_LD_VERSION                               policy<{'amd64': '24200', 'arm64
 CONFIG_NVGRACE_EGM                              policy<{'arm64': 'm'}>
 CONFIG_NVGRACE_GPU_VFIO_PCI                     policy<{'amd64': '-', 'arm64': 'm'}>
 CONFIG_PAHOLE_VERSION                           policy<{'amd64': '125', 'arm64': '125'}>
-CONFIG_R8127                                    policy<{'amd64': 'n', 'arm64': 'm'}>
 CONFIG_PROC_CPU_RESCTRL                         policy<{'amd64': 'y', 'arm64': 'y'}>
+CONFIG_R8127                                    policy<{'amd64': 'n', 'arm64': 'm'}>
 CONFIG_RELR                                     policy<{'arm64': '-'}>
 CONFIG_RESCTRL_FS                               policy<{'amd64': 'y', 'arm64': 'y'}>
 CONFIG_RESCTRL_FS_PSEUDO_LOCK                   policy<{'amd64': 'y', 'arm64': '-'}>
@@ -215,7 +210,6 @@ CONFIG_RUST_IS_AVAILABLE                        policy<{'amd64': '-', 'arm64': '
 CONFIG_RUST_OVERFLOW_CHECKS                     policy<{'amd64': '-'}>
 CONFIG_RUST_PHYLIB_ABSTRACTIONS                 policy<{'amd64': '-'}>
 CONFIG_SAMPLES_RUST                             policy<{'amd64': '-'}>
-CONFIG_TEGRA241_CMDQV                           policy<{'arm64': 'n'}>
 CONFIG_TEGRA241_CMDQV                           policy<{'arm64': 'y'}>
 CONFIG_TOOLS_SUPPORT_RELR                       policy<{'amd64': 'y', 'arm64': '-'}>
 CONFIG_VFIO_CONTAINER                           policy<{'amd64': 'y', 'arm64': 'n'}>
