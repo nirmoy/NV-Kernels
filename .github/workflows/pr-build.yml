@@ -1,0 +1,41 @@
+name: Kernel build sanity test
+
+on:
+  pull_request:
+    branches: [ '*' ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      matrix:
+        include:
+          - runs-on: ubuntu-latest
+            config: defconfig
+          - runs-on: ubuntu-latest-arm64
+            config: config_4k
+          - runs-on: ubuntu-latest-arm64
+            config: config_64k
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libncurses-dev bison flex libssl-dev libelf-dev
+
+      - name: Configure Kernel
+        run: |
+          echo "Using ${{ matrix.config }} configuration on ${{ matrix.runs-on }}"
+          if [ "${{ matrix.config }}" = "defconfig" ]; then
+            make defconfig
+          else
+            cp .github/workflows/${{ matrix.config }} .config
+            make oldconfig
+          fi
+
+      - name: Build Kernel
+        run: |
+          make -j$(nproc)
