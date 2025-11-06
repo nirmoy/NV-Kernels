@@ -286,16 +286,54 @@ static char *nv_cspmu_format_name(const struct arm_cspmu *cspmu,
 {
 	char *name;
 	struct device *dev = cspmu->dev;
-
+	u32 prodid;
 	static atomic_t pmu_generic_idx = {0};
+	/* Per-prodid counters to ensure unique names */
+	static atomic_t pmu_pcie_idx = {0};
+	static atomic_t pmu_nvlink_c2c1_idx = {0};
+	static atomic_t pmu_nvlink_c2c0_idx = {0};
+	static atomic_t pmu_cnvlink_idx = {0};
+	static atomic_t pmu_scf_idx = {0};
+
+	prodid = FIELD_GET(ARM_CSPMU_PMIIDR_PRODUCTID, cspmu->impl.pmiidr);
 
 	switch (match->name_fmt) {
 	case NAME_FMT_SOCKET: {
-		const int cpu = cpumask_first(&cspmu->associated_cpus);
-		const int socket = cpu_to_node(cpu);
+		atomic_t *idx_ptr = NULL;
 
-		name = devm_kasprintf(dev, GFP_KERNEL, match->name_pattern,
-				       socket);
+		/* Select the appropriate counter based on product ID */
+		switch (prodid & NV_PRODID_MASK) {
+		case 0x103:
+			idx_ptr = &pmu_pcie_idx;
+			break;
+		case 0x104:
+			idx_ptr = &pmu_nvlink_c2c1_idx;
+			break;
+		case 0x105:
+			idx_ptr = &pmu_nvlink_c2c0_idx;
+			break;
+		case 0x106:
+			idx_ptr = &pmu_cnvlink_idx;
+			break;
+		case 0x2CF:
+			idx_ptr = &pmu_scf_idx;
+			break;
+		default:
+			break;
+		}
+
+		/* Use per-prodid index to ensure uniqueness across all sockets */
+		if (idx_ptr) {
+			unsigned int idx = atomic_fetch_inc(idx_ptr);
+			name = devm_kasprintf(dev, GFP_KERNEL, match->name_pattern,
+					       idx);
+		} else {
+			/* Fallback to socket-based naming if prodid not recognized */
+			const int cpu = cpumask_first(&cspmu->associated_cpus);
+			const int socket = cpu_to_node(cpu);
+			name = devm_kasprintf(dev, GFP_KERNEL, match->name_pattern,
+					       socket);
+		}
 		break;
 	}
 	case NAME_FMT_GENERIC:
