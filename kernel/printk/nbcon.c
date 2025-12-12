@@ -1505,17 +1505,28 @@ static int __nbcon_atomic_flush_pending_con(struct console *con, u64 stop_seq,
 	ctxt->prio			= nbcon_get_default_prio();
 	ctxt->allow_unsafe_takeover	= allow_unsafe_takeover;
 
-	if (!nbcon_context_try_acquire(ctxt, false))
-		return -EPERM;
-
 	while (nbcon_seq_read(con) < stop_seq) {
 		/*
-		 * nbcon_emit_next_record() returns false when the console was
-		 * handed over or taken over. In both cases the context is no
-		 * longer valid.
+		 * Atomic flushing does not use console driver synchronization
+		 * (i.e. it does not hold the port lock for uart consoles).
+		 * Therefore IRQs must be disabled to avoid being interrupted
+		 * and then calling into a driver that will deadlock trying
+		 * to acquire console ownership.
 		 */
-		if (!nbcon_emit_next_record(&wctxt, true))
-			return -EAGAIN;
+		scoped_guard(irqsave) {
+			if (!nbcon_context_try_acquire(ctxt, false))
+				return -EPERM;
+
+			/*
+			 * nbcon_emit_next_record() returns false when
+			 * the console was handed over or taken over.
+			 * In both cases the context is no longer valid.
+			 */
+			if (!nbcon_emit_next_record(&wctxt, true))
+				return -EAGAIN;
+
+			nbcon_context_release(ctxt);
+		}
 
 		if (!ctxt->backlog) {
 			/* Are there reserved but not yet finalized records? */
@@ -1525,7 +1536,6 @@ static int __nbcon_atomic_flush_pending_con(struct console *con, u64 stop_seq,
 		}
 	}
 
-	nbcon_context_release(ctxt);
 	return err;
 }
 
@@ -1545,21 +1555,10 @@ static void nbcon_atomic_flush_pending_con(struct console *con, u64 stop_seq,
 					   bool allow_unsafe_takeover)
 {
 	struct console_flush_type ft;
-	unsigned long flags;
 	int err;
 
 again:
-	/*
-	 * Atomic flushing does not use console driver synchronization (i.e.
-	 * it does not hold the port lock for uart consoles). Therefore IRQs
-	 * must be disabled to avoid being interrupted and then calling into
-	 * a driver that will deadlock trying to acquire console ownership.
-	 */
-	local_irq_save(flags);
-
 	err = __nbcon_atomic_flush_pending_con(con, stop_seq, allow_unsafe_takeover);
-
-	local_irq_restore(flags);
 
 	/*
 	 * If there was a new owner (-EPERM, -EAGAIN), that context is
