@@ -2190,6 +2190,23 @@ EXPORT_SYMBOL_GPL(i3c_master_add_i3c_dev_locked);
 
 #define OF_I3C_REG1_IS_I2C_DEV			BIT(31)
 
+static int i3c_acpi_get_i2c_resource(struct acpi_resource *ares, void *data)
+{
+	struct i2c_dev_boardinfo *boardinfo = data;
+	struct acpi_resource_i2c_serialbus *sb;
+
+	if (!i2c_acpi_get_i2c_resource(ares, &sb))
+		return 1;
+
+	boardinfo->base.addr = sb->slave_address;
+	if (sb->access_mode == ACPI_I2C_10BIT_MODE)
+		boardinfo->base.flags |= I2C_CLIENT_TEN;
+
+	boardinfo->lvr = sb->lvr;
+
+	return 1;
+}
+
 static int
 i3c_master_add_i2c_boardinfo(struct i3c_master_controller *master,
 			     struct fwnode_handle *fwnode, u32 *reg)
@@ -2197,6 +2214,7 @@ i3c_master_add_i2c_boardinfo(struct i3c_master_controller *master,
 	struct i2c_dev_boardinfo *boardinfo;
 	struct device *dev = &master->dev;
 	struct acpi_device *adev;
+	LIST_HEAD(resources);
 	int ret = -EINVAL;
 
 	boardinfo = devm_kzalloc(dev, sizeof(*boardinfo), GFP_KERNEL);
@@ -2207,8 +2225,22 @@ i3c_master_add_i2c_boardinfo(struct i3c_master_controller *master,
 		ret = of_i2c_get_board_info(dev, to_of_node(fwnode), &boardinfo->base);
 		if (ret)
 			return ret;
-	} else {
-		return -EINVAL;
+
+		/* LVR is encoded in reg[2] for Device Tree. */
+		boardinfo->lvr = reg[2];
+	} else if (is_acpi_device_node(fwnode)) {
+		adev = to_acpi_device_node(fwnode);
+		if (!adev)
+			return -ENODEV;
+
+		boardinfo->base.fwnode = acpi_fwnode_handle(adev);
+		ret = acpi_dev_get_resources(adev, &resources,
+					     i3c_acpi_get_i2c_resource, boardinfo);
+
+		if (ACPI_FAILURE(ret) || !boardinfo->base.addr)
+			return -EINVAL;
+
+		acpi_dev_free_resource_list(&resources);
 	}
 
 	/*
@@ -2220,9 +2252,6 @@ i3c_master_add_i2c_boardinfo(struct i3c_master_controller *master,
 		dev_err(dev, "I2C device with 10 bit address not supported.");
 		return -EOPNOTSUPP;
 	}
-
-	/* LVR is encoded in reg[2]. */
-	boardinfo->lvr = reg[2];
 
 	list_add_tail(&boardinfo->node, &master->boardinfo.i2c);
 	fwnode_handle_get(fwnode);
@@ -2278,8 +2307,8 @@ i3c_master_add_i3c_boardinfo(struct i3c_master_controller *master,
 	return 0;
 }
 
-static int i3c_master_add_dev(struct i3c_master_controller *master,
-			      struct fwnode_handle *fwnode)
+static int i3c_master_add_of_dev(struct i3c_master_controller *master,
+				 struct fwnode_handle *fwnode)
 {
 	u32 reg[3];
 	int ret;
@@ -2300,19 +2329,44 @@ static int i3c_master_add_dev(struct i3c_master_controller *master,
 	return ret;
 }
 
+static int i3c_master_add_acpi_dev(struct i3c_master_controller *master,
+				   struct fwnode_handle *fwnode)
+{
+	struct acpi_device *adev = to_acpi_device_node(fwnode);
+	u32 reg[3], adr;
+
+	/* I2C device on an I3C bus should not have _ADR property as per spec */
+	if (!acpi_has_method(adev->handle, "_ADR"))
+		return i3c_master_add_i2c_boardinfo(master, adev->handle, reg);
+
+	adr = acpi_device_adr(adev);
+
+	/* _ADR will have the 48 bit PID of the device  */
+	reg[1] = lower_32_bits(adr);
+	reg[2] = upper_32_bits(adr);
+
+	fwnode_property_read_u32(fwnode, "mipi-i3c-static-address", &reg[0]);
+
+	return i3c_master_add_i3c_boardinfo(master, fwnode, reg);
+}
+
 static int fwnode_populate_i3c_bus(struct i3c_master_controller *master)
 {
 	struct device *dev = &master->dev;
 	struct fwnode_handle *fwnode = dev_fwnode(dev);
 	struct fwnode_handle *child;
-	int ret;
+	int ret = -ENODEV;
 	u32 val;
 
 	if (!fwnode)
 		return 0;
 
 	fwnode_for_each_available_child_node(fwnode, child) {
-		ret = i3c_master_add_dev(master, child);
+		if (is_of_node(child))
+			ret = i3c_master_add_of_dev(master, child);
+		else if (is_acpi_device_node(child))
+			ret = i3c_master_add_acpi_dev(master, child);
+
 		if (ret)
 			return ret;
 	}
@@ -2372,10 +2426,28 @@ static u8 i3c_master_i2c_get_lvr(struct i2c_client *client)
 {
 	/* Fall back to no spike filters and FM bus mode. */
 	u8 lvr = I3C_LVR_I2C_INDEX(2) | I3C_LVR_I2C_FM_MODE;
+	struct i2c_dev_boardinfo boardinfo;
+	struct acpi_device *adev;
+	LIST_HEAD(resources);
 	u32 reg[3];
 
-	if (!fwnode_property_read_u32_array(client->dev.fwnode, "reg", reg, ARRAY_SIZE(reg)))
-		lvr = reg[2];
+	if (is_of_node(client->dev.fwnode)) {
+		if (!fwnode_property_read_u32_array(client->dev.fwnode, "reg",
+						    reg, ARRAY_SIZE(reg)))
+			lvr = reg[2];
+	} else if (is_acpi_device_node(client->dev.fwnode)) {
+		adev = to_acpi_device_node(client->dev.fwnode);
+		if (adev) {
+			memset(&boardinfo, 0, sizeof(boardinfo));
+			acpi_dev_get_resources(adev, &resources,
+					       i3c_acpi_get_i2c_resource, &boardinfo);
+
+			if (boardinfo.base.addr)
+				lvr = boardinfo.lvr;
+
+			acpi_dev_free_resource_list(&resources);
+		}
+	}
 
 	return lvr;
 }
