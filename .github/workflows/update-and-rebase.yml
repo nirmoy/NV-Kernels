@@ -10,7 +10,6 @@ on:
         required: false
         type: choice
         options:
-          - all
           - linux-nvidia-6.6
           - linux-nvidia-6.12
           - linux-nvidia-6.18
@@ -30,7 +29,9 @@ jobs:
         id: check
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            if [ "${{ inputs.branch }}" != "all" ] && [ "${{ inputs.branch }}" != "${{ matrix.branch }}" ]; then
+            # Skip only if a specific branch was selected AND it's not this one
+            # Empty means process all branches
+            if [ -n "${{ inputs.branch }}" ] && [ "${{ inputs.branch }}" != "${{ matrix.branch }}" ]; then
               echo "skip=true" >> $GITHUB_OUTPUT
             else
               echo "skip=false" >> $GITHUB_OUTPUT
