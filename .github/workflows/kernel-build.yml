@@ -1,8 +1,22 @@
 name: Kernel Test
 
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build'
+        required: true
+        type: choice
+        options:
+          - linux-nvidia-6.6
+          - linux-nvidia-6.12
+          - linux-nvidia-6.18
+  workflow_call:
+    inputs:
+      branch:
+        description: 'Branch to build'
+        required: true
+        type: string
 
 jobs:
   build:
@@ -18,9 +32,16 @@ jobs:
           - runs-on: ubuntu-24.04-arm
             config: config_64k
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout kernel branch
+        uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.branch }}
           fetch-depth: 0
+
+      - name: Fetch config files from github-actions branch
+        run: |
+          git fetch origin github-actions
+          git checkout origin/github-actions -- .github/workflows/config_4k .github/workflows/config_64k
 
       - name: Install Dependencies
         run: |
