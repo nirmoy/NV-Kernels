@@ -1,0 +1,98 @@
+name: Update and Rebase
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to rebase (leave empty for all)'
+        required: false
+        type: choice
+        options:
+          - all
+          - linux-nvidia-6.6
+          - linux-nvidia-6.12
+          - linux-nvidia-6.18
+
+jobs:
+  update-rebase-branch:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        branch:
+          - linux-nvidia-6.6
+          - linux-nvidia-6.12
+          - linux-nvidia-6.18
+    steps:
+      - name: Check if branch should be processed
+        id: check
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.branch }}" != "all" ] && [ "${{ inputs.branch }}" != "${{ matrix.branch }}" ]; then
+              echo "skip=true" >> $GITHUB_OUTPUT
+            else
+              echo "skip=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout target branch
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch }}
+          fetch-depth: 0
+
+      - name: Add upstream remote (if not exists)
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          if ! git remote | grep -q upstream; then
+            git remote add upstream https://github.com/gregkh/linux.git
+          fi
+
+      - name: Fetch upstream tags
+        if: steps.check.outputs.skip != 'true'
+        run: git fetch upstream --tags
+
+      - name: Find latest stable tag for branch
+        if: steps.check.outputs.skip != 'true'
+        id: latest_tag
+        run: |
+          version=$(echo "${{ matrix.branch }}" | sed 's/^linux-nvidia-//')
+          tag=$(git describe --abbrev=0 --tags upstream/linux-${version}.y)
+          echo "tag=$tag" >> $GITHUB_OUTPUT
+
+      - name: Fetch patch branch
+        if: steps.check.outputs.skip != 'true'
+        run: git fetch origin ${{ matrix.branch }}
+
+      - name: Find merge base between patch branch and updated LTS
+        if: steps.check.outputs.skip != 'true'
+        id: merge_base
+        run: |
+          base=$(git merge-base origin/${{ matrix.branch }} ${{ steps.latest_tag.outputs.tag }})
+          echo "base=$base" >> $GITHUB_OUTPUT
+
+      - name: Create new branch for rebased patches
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          git checkout -b ${{ matrix.branch }}-${{ steps.latest_tag.outputs.tag }} origin/${{ matrix.branch }}
+
+      - name: Set git user identity
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Rebase patch branch onto updated LTS
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          git rebase --onto ${{ steps.latest_tag.outputs.tag }} ${{ steps.merge_base.outputs.base }}
+
+      - name: Push rebased patch branch
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          git push --force origin HEAD:${{ matrix.branch }}-${{ steps.latest_tag.outputs.tag }}
