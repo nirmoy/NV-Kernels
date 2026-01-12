@@ -56,7 +56,7 @@ jobs:
 
       - name: Fetch upstream tags
         if: steps.check.outputs.skip != 'true'
-        run: git fetch upstream --tags
+        run: git fetch upstream --tags --force
 
       - name: Find latest stable tag for branch
         if: steps.check.outputs.skip != 'true'
