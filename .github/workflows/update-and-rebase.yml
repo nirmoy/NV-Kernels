@@ -64,7 +64,19 @@ jobs:
       branch-6-12: ${{ steps.mark-success.outputs.branch-6-12 }}
       branch-6-18: ${{ steps.mark-success.outputs.branch-6-18 }}
     steps:
+      - name: Check if already rebased to this tag
+        id: check-tag
+        run: |
+          if git ls-remote --tags https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git \
+               "refs/tags/${{ matrix.branch }}-${{ matrix.tag }}" | grep -q .; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "::notice::Tag ${{ matrix.branch }}-${{ matrix.tag }} already exists, skipping rebase"
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Checkout target branch
+        if: steps.check-tag.outputs.skip != 'true'
         run: |
           git init -q
           git remote add origin https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git
@@ -72,38 +84,51 @@ jobs:
           git checkout -b ${{ matrix.branch }} origin/${{ matrix.branch }}
 
       - name: Fetch upstream tag
+        if: steps.check-tag.outputs.skip != 'true'
         run: |
           git remote add upstream https://github.com/gregkh/linux.git
           git fetch upstream tag ${{ matrix.tag }} --no-tags
 
       - name: Find merge base
+        if: steps.check-tag.outputs.skip != 'true'
         id: merge_base
         run: |
           base=$(git merge-base HEAD ${{ matrix.tag }})
           echo "base=$base" >> $GITHUB_OUTPUT
 
       - name: Create rebased branch
+        if: steps.check-tag.outputs.skip != 'true'
         run: |
-          git checkout -b ${{ matrix.branch }}-${{ matrix.tag }}
+          git checkout -B ${{ matrix.branch }}-next
 
       - name: Set git user identity
+        if: steps.check-tag.outputs.skip != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Rebase onto upstream tag
+        if: steps.check-tag.outputs.skip != 'true'
         run: |
           git rebase --onto ${{ matrix.tag }} ${{ steps.merge_base.outputs.base }}
 
       - name: Push rebased branch
+        if: steps.check-tag.outputs.skip != 'true'
         run: |
-          git push --force origin HEAD:${{ matrix.branch }}-${{ matrix.tag }}
+          git push --force origin HEAD:${{ matrix.branch }}-next
+
+      - name: Create and push version tag
+        if: steps.check-tag.outputs.skip != 'true'
+        run: |
+          git tag -f ${{ matrix.branch }}-${{ matrix.tag }}
+          git push --force origin ${{ matrix.branch }}-${{ matrix.tag }}
 
       - name: Mark rebase successful
+        if: steps.check-tag.outputs.skip != 'true'
         id: mark-success
         run: |
           key=$(echo "${{ matrix.branch }}" | sed 's/linux-nvidia-/branch-/' | tr '.' '-')
-          echo "${key}=${{ matrix.branch }}-${{ matrix.tag }}" >> $GITHUB_OUTPUT
+          echo "${key}=${{ matrix.branch }}-next" >> $GITHUB_OUTPUT
 
   build-6-6:
     needs: [prepare, update-rebase-branch]
