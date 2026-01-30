@@ -1,8 +1,8 @@
 # Menu: HEADER
 # FORMAT: 4
 # ARCH: amd64 arm64
-# FLAVOUR: amd64-nvidia arm64-nvidia arm64-nvidia-64k
-# FLAVOUR_DEP: {'amd64-nvidia': 'amd64-generic', 'arm64-nvidia': 'arm64-generic', 'arm64-nvidia-64k': 'arm64-generic-64k'}
+# FLAVOUR: amd64-nvidia arm64-nvidia arm64-nvidia-64k arm64-nvidia-kmemleak arm64-nvidia-64k-kmemleak
+# FLAVOUR_DEP: {'amd64-nvidia': 'amd64-generic', 'arm64-nvidia': 'arm64-generic', 'arm64-nvidia-64k': 'arm64-generic-64k', 'arm64-nvidia-kmemleak': 'arm64-nvidia', 'arm64-nvidia-64k-kmemleak': 'arm64-nvidia-64k'}
 
 include "../../debian.master/config/annotations"
 
@@ -261,3 +261,20 @@ CONFIG_TOOLS_SUPPORT_RELR                       policy<{'amd64': 'y', 'arm64': '
 CONFIG_UCSI_HUAWEI_GAOKUN                       policy<{'arm64': '-'}>
 CONFIG_VFIO_CONTAINER                           policy<{'amd64': 'y', 'arm64': 'n'}>
 CONFIG_VFIO_IOMMU_TYPE1                         policy<{'amd64': 'm', 'arm64': '-'}>
+
+# ---- Kmemleak debug flavors ----
+
+CONFIG_DEBUG_KMEMLEAK                           policy<{'arm64-nvidia-kmemleak': 'y', 'arm64-nvidia-64k-kmemleak': 'y'}>
+CONFIG_DEBUG_KMEMLEAK                           note<'Enable kernel memory leak detector for debug flavors'>
+
+CONFIG_DEBUG_KMEMLEAK_MEM_POOL_SIZE             policy<{'arm64-nvidia-kmemleak': '16000', 'arm64-nvidia-64k-kmemleak': '16000'}>
+CONFIG_DEBUG_KMEMLEAK_MEM_POOL_SIZE             note<'Kmemleak memory pool size'>
+
+CONFIG_DEBUG_KMEMLEAK_DEFAULT_OFF               policy<{'arm64-nvidia-kmemleak': 'n', 'arm64-nvidia-64k-kmemleak': 'n'}>
+CONFIG_DEBUG_KMEMLEAK_DEFAULT_OFF               note<'Enable kmemleak by default on boot'>
+
+CONFIG_DEBUG_KMEMLEAK_AUTO_SCAN                 policy<{'arm64-nvidia-kmemleak': 'y', 'arm64-nvidia-64k-kmemleak': 'y'}>
+CONFIG_DEBUG_KMEMLEAK_AUTO_SCAN                 note<'Enable automatic kmemleak scanning'>
+
+CONFIG_SAMPLE_KMEMLEAK                          policy<{'arm64-nvidia-kmemleak': 'n', 'arm64-nvidia-64k-kmemleak': 'n'}>
+CONFIG_SAMPLE_KMEMLEAK                          note<'Disable kmemleak sample/test module'>

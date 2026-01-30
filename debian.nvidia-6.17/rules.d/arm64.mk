@@ -1,6 +1,6 @@
 build_arch	= arm64
 defconfig	= defconfig
-flavours	= nvidia nvidia-64k
+flavours	= nvidia nvidia-64k nvidia-kmemleak nvidia-64k-kmemleak
 build_image	= Image.gz
 kernel_file	= arch/$(build_arch)/boot/Image.gz
 install_file	= vmlinuz
