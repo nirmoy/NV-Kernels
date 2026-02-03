@@ -1197,6 +1197,7 @@ CONFIG_AM2315                                   policy<{'amd64': 'm', 'arm64': '
 CONFIG_AM335X_CONTROL_USB                       policy<{'armhf': 'm'}>
 CONFIG_AM335X_PHY_USB                           policy<{'armhf': 'm'}>
 CONFIG_AMBA_PL08X                               policy<{'arm64': 'y', 'armhf': 'y', 'riscv64': '-'}>
+CONFIG_AMCC_QT2025_PHY                          policy<{'amd64': 'm', 'arm64': 'm'}>
 CONFIG_AMD8111_ETH                              policy<{'amd64': 'm', 'arm64': 'm', 'armhf': 'm', 'ppc64el': 'm', 'riscv64': 'm', 's390x': '-'}>
 CONFIG_AMDTEE                                   policy<{'amd64': 'm'}>
 CONFIG_AMD_3D_VCACHE                            policy<{'amd64': 'm'}>
