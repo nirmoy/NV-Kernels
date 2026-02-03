@@ -265,7 +265,7 @@ static int call_lfa_activate(void *data)
 			continue;
 		}
 
-		pr_err("CTIVATE for image %s timed out", attrs->image_name);
+		pr_err("ACTIVATE for image %s timed out", attrs->image_name);
 		return -ETIMEDOUT;
 	}
 
@@ -565,6 +565,8 @@ static int update_fw_image_node(char *fw_uuid, int seq_id,
 	for (int i = 0; i < ARRAY_SIZE(fw_images_uuids); i++) {
 		if (!strcmp(fw_images_uuids[i].uuid, fw_uuid))
 			image_name = fw_images_uuids[i].name;
+		else
+			image_name = fw_uuid;
 	}
 
 	attrs->image_dir = kobject_create_and_add(fw_uuid, lfa_dir);
@@ -695,6 +697,7 @@ static void lfa_notify_handler(acpi_handle handle, u32 event, void *data)
 			 * So, set the flasg and exit loop.
 			 */
 			found_activable_image = true;
+			break;
 		}
 
 		if (found_activable_image) {
