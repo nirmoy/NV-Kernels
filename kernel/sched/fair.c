@@ -12914,7 +12914,6 @@ static inline void task_tick_core(struct rq *rq, struct task_struct *curr)
 }
 
 /*
-<<<<<<< HEAD
  * se_fi_update - Update the cfs_rq->zero_vruntime_fi in a CFS hierarchy if needed.
  */
 static void se_fi_update(const struct sched_entity *se, unsigned int fi_seq,
