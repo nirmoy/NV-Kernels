@@ -34,6 +34,7 @@ struct vfio_pci_cxl_state {
 	u8                           comp_reg_bar;
 	bool                         cache_capable;
 	bool                         precommitted;
+	bool                         region_active;
 };
 
 /* Register access sizes */
@@ -96,5 +97,7 @@ vfio_cxl_read_committed_decoder_size(struct vfio_pci_core_device *vdev,
 int vfio_cxl_create_cxl_region(struct vfio_pci_cxl_state *cxl,
 			       resource_size_t size);
 void vfio_cxl_destroy_cxl_region(struct vfio_pci_cxl_state *cxl);
+
+__le32 *hdm_reg_ptr(struct vfio_pci_cxl_state *cxl, u32 hdm_off);
 
 #endif /* __LINUX_VFIO_CXL_PRIV_H */

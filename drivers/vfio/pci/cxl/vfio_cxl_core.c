@@ -435,4 +435,191 @@ void vfio_pci_cxl_cleanup(struct vfio_pci_core_device *vdev)
 	vfio_cxl_destroy_cxl_region(cxl);
 }
 
+static vm_fault_t vfio_cxl_region_vm_fault(struct vm_fault *vmf)
+{
+	struct vfio_pci_region *region = vmf->vma->vm_private_data;
+	struct vfio_pci_cxl_state *cxl = region->data;
+	unsigned long pgoff;
+	unsigned long pfn;
+
+	if (!READ_ONCE(cxl->region_active))
+		return VM_FAULT_SIGBUS;
+
+	pgoff = vmf->pgoff &
+		((1UL << (VFIO_PCI_OFFSET_SHIFT - PAGE_SHIFT)) - 1);
+
+	if (pgoff >= (cxl->region_size >> PAGE_SHIFT))
+		return VM_FAULT_SIGBUS;
+
+	pfn = PHYS_PFN(cxl->region_hpa) + pgoff;
+
+	return vmf_insert_pfn(vmf->vma, vmf->address, pfn);
+}
+
+static const struct vm_operations_struct vfio_cxl_region_vm_ops = {
+	.fault = vfio_cxl_region_vm_fault,
+};
+
+static int vfio_cxl_region_mmap(struct vfio_pci_core_device *vdev,
+				struct vfio_pci_region *region,
+				struct vm_area_struct *vma)
+{
+	struct vfio_pci_cxl_state *cxl = vdev->cxl;
+	u64 req_len, pgoff, end;
+
+	if (!(region->flags & VFIO_REGION_INFO_FLAG_MMAP))
+		return -EINVAL;
+
+	if (!(region->flags & VFIO_REGION_INFO_FLAG_READ) &&
+	    (vma->vm_flags & VM_READ))
+		return -EPERM;
+
+	if (!(region->flags & VFIO_REGION_INFO_FLAG_WRITE) &&
+	    (vma->vm_flags & VM_WRITE))
+		return -EPERM;
+
+	pgoff = vma->vm_pgoff &
+		((1U << (VFIO_PCI_OFFSET_SHIFT - PAGE_SHIFT)) - 1);
+
+	if (check_sub_overflow(vma->vm_end, vma->vm_start, &req_len) ||
+	    check_add_overflow(PFN_PHYS(pgoff), req_len, &end))
+		return -EOVERFLOW;
+
+	if (end > cxl->region_size)
+		return -EINVAL;
+
+	vma->vm_page_prot = pgprot_decrypted(vma->vm_page_prot);
+
+	vm_flags_set(vma, VM_ALLOW_ANY_UNCACHED | VM_IO | VM_PFNMAP |
+		     VM_DONTEXPAND | VM_DONTDUMP);
+
+	vma->vm_ops = &vfio_cxl_region_vm_ops;
+	vma->vm_private_data = region;
+
+	return 0;
+}
+
+/*
+ * vfio_cxl_zap_region_locked - Invalidate all DPA region PTEs.
+ *
+ * Must be called with vdev->memory_lock held for writing.  Sets
+ * region_active=false before zapping so any subsequent I/O to the region
+ * sees the inactive state and returns an error rather than accessing
+ * stale mappings.
+ */
+void vfio_cxl_zap_region_locked(struct vfio_pci_core_device *vdev)
+{
+	struct vfio_pci_cxl_state *cxl = vdev->cxl;
+
+	lockdep_assert_held_write(&vdev->memory_lock);
+
+	if (!cxl)
+		return;
+
+	WRITE_ONCE(cxl->region_active, false);
+}
+
+/*
+ * vfio_cxl_reactivate_region - Re-enable DPA region after successful reset.
+ *
+ * Must be called with vdev->memory_lock held for writing.  Re-reads the
+ * HDM decoder state from hardware (FLR cleared it) and sets region_active
+ * so that subsequent I/O to the region is permitted again.
+ */
+void vfio_cxl_reactivate_region(struct vfio_pci_core_device *vdev)
+{
+	struct vfio_pci_cxl_state *cxl = vdev->cxl;
+
+	lockdep_assert_held_write(&vdev->memory_lock);
+
+	if (!cxl)
+		return;
+	/*
+	 * Re-initialise the emulated HDM comp_reg_virt[] from hardware.
+	 * After FLR the decoder registers read as zero; mirror that in
+	 * the emulated state so QEMU sees a clean slate.
+	 */
+	vfio_cxl_reinit_comp_regs(cxl);
+
+	/*
+	 * Only re-enable the DPA mmap if the hardware has actually
+	 * re-committed decoder 0 after FLR.  Read the COMMITTED bit from the
+	 * freshly-re-snapshotted comp_reg_virt[] so we check the post-FLR
+	 * hardware state, not stale pre-reset state.
+	 *
+	 * If COMMITTED is 0 (slow firmware re-commit path), leave
+	 * region_active=false.	 Guest faults will return VM_FAULT_SIGBUS
+	 * until the decoder is re-committed and the region is re-enabled.
+	 */
+	if (cxl->precommitted && cxl->comp_reg_virt) {
+		/*
+		 * Read CTRL via the full CXL.mem-relative index: hdm_reg_offset
+		 * (now CXL.mem-relative) plus the within-HDM-block offset.
+		 */
+		u32 ctrl = le32_to_cpu(*hdm_reg_ptr(cxl,
+					    CXL_HDM_DECODER0_CTRL_OFFSET(0)));
+
+		if (ctrl & CXL_HDM_DECODER0_CTRL_COMMITTED)
+			WRITE_ONCE(cxl->region_active, true);
+	}
+}
+
+static ssize_t vfio_cxl_region_rw(struct vfio_pci_core_device *core_dev,
+				  char __user *buf, size_t count, loff_t *ppos,
+				  bool iswrite)
+{
+	unsigned int i = VFIO_PCI_OFFSET_TO_INDEX(*ppos) - VFIO_PCI_NUM_REGIONS;
+	struct vfio_pci_cxl_state *cxl = core_dev->region[i].data;
+	loff_t pos = *ppos & VFIO_PCI_OFFSET_MASK;
+
+	if (!count || pos >= cxl->region_size)
+		return 0;
+
+	/*
+	 * Guard against access after a failed reset (region_active=false)
+	 * or a release race (region_vaddr=NULL).  Either condition means
+	 * the memremap'd window is no longer valid; touching it would produce
+	 * a Synchronous External Abort.  Return -EIO so the caller gets a
+	 * clean error rather than a kernel oops.
+	 */
+	if (!READ_ONCE(cxl->region_active) || !cxl->region_vaddr)
+		return -EIO;
+
+	count = min(count, (size_t)(cxl->region_size - pos));
+
+	if (iswrite) {
+		if (copy_from_user(cxl->region_vaddr + pos, buf, count))
+			return -EFAULT;
+	} else {
+		if (copy_to_user(buf, cxl->region_vaddr + pos, count))
+			return -EFAULT;
+	}
+
+	return count;
+}
+
+static void vfio_cxl_region_release(struct vfio_pci_core_device *vdev,
+				    struct vfio_pci_region *region)
+{
+	struct vfio_pci_cxl_state *cxl = region->data;
+
+	/*
+	 * Deactivate the region before removing user mappings so that any
+	 * fault handler racing the release returns VM_FAULT_SIGBUS rather
+	 * than inserting a PFN into an unmapped region.
+	 */
+	WRITE_ONCE(cxl->region_active, false);
+
+	if (cxl->region_vaddr) {
+		memunmap(cxl->region_vaddr);
+		cxl->region_vaddr = NULL;
+	}
+}
+
+static const struct vfio_pci_regops vfio_cxl_regops = {
+	.rw		= vfio_cxl_region_rw,
+	.mmap		= vfio_cxl_region_mmap,
+	.release	= vfio_cxl_region_release,
+};
+
 MODULE_IMPORT_NS("CXL");
