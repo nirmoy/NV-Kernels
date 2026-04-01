@@ -149,8 +149,11 @@ static int vfio_cxl_setup_regs(struct vfio_pci_core_device *vdev,
 	cxl->comp_reg_offset = bar_offset;
 	cxl->comp_reg_size = CXL_COMPONENT_REG_BLOCK_SIZE;
 
+	ret = vfio_cxl_setup_virt_regs(vdev, cxl, base);
 	iounmap(base);
 	release_mem_region(map->resource, map->max_size);
+	if (ret)
+		return ret;
 
 	return 0;
 
@@ -253,6 +256,8 @@ void vfio_pci_cxl_cleanup(struct vfio_pci_core_device *vdev)
 
 	if (!cxl)
 		return;
+
+	vfio_cxl_clean_virt_regs(cxl);
 }
 
 MODULE_IMPORT_NS("CXL");
