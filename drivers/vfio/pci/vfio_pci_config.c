@@ -1072,6 +1072,49 @@ static int __init init_pci_ext_cap_pwr_perm(struct perm_bits *perm)
 }
 
 /*
+ * vfio_pci_dvsec_dispatch_read - per-device DVSEC read dispatcher.
+ *
+ * Installed as ecap_perms[PCI_EXT_CAP_ID_DVSEC].readfn at module init.
+ * Calls vdev->dvsec_readfn when a shadow-read handler has been registered
+ * (e.g. by vfio_cxl_setup_dvsec_perms() for CXL Type-2 devices), otherwise
+ * continue to vfio_raw_config_read for hardware pass-through.
+ *
+ * This indirection allows per-device DVSEC reads from vconfig shadow
+ * without touching the global ecap_perms[] table.
+ */
+static int vfio_pci_dvsec_dispatch_read(struct vfio_pci_core_device *vdev,
+					int pos, int count,
+					struct perm_bits *perm,
+					int offset, __le32 *val)
+{
+	if (vdev->dvsec_readfn)
+		return vdev->dvsec_readfn(vdev, pos, count, perm, offset, val);
+	return vfio_raw_config_read(vdev, pos, count, perm, offset, val);
+}
+
+/*
+ * vfio_pci_dvsec_dispatch_write - per-device DVSEC write dispatcher.
+ *
+ * Installed as ecap_perms[PCI_EXT_CAP_ID_DVSEC].writefn at module init.
+ * Calls vdev->dvsec_writefn when a handler has been registered for this
+ * device (e.g. by vfio_cxl_setup_dvsec_perms() for CXL Type-2 devices),
+ * otherwise proceed to vfio_raw_config_write so that non-CXL devices
+ * with a DVSEC capability continue to pass writes to hardware.
+ *
+ * This indirection allows per-device DVSEC handlers to be registered
+ * without touching the global ecap_perms[] table.
+ */
+static int vfio_pci_dvsec_dispatch_write(struct vfio_pci_core_device *vdev,
+					 int pos, int count,
+					 struct perm_bits *perm,
+					 int offset, __le32 val)
+{
+	if (vdev->dvsec_writefn)
+		return vdev->dvsec_writefn(vdev, pos, count, perm, offset, val);
+	return vfio_raw_config_write(vdev, pos, count, perm, offset, val);
+}
+
+/*
  * Initialize the shared permission tables
  */
 void vfio_pci_uninit_perm_bits(void)
@@ -1107,7 +1150,8 @@ int __init vfio_pci_init_perm_bits(void)
 	ret |= init_pci_ext_cap_err_perm(&ecap_perms[PCI_EXT_CAP_ID_ERR]);
 	ret |= init_pci_ext_cap_pwr_perm(&ecap_perms[PCI_EXT_CAP_ID_PWR]);
 	ecap_perms[PCI_EXT_CAP_ID_VNDR].writefn = vfio_raw_config_write;
-	ecap_perms[PCI_EXT_CAP_ID_DVSEC].writefn = vfio_raw_config_write;
+	ecap_perms[PCI_EXT_CAP_ID_DVSEC].readfn  = vfio_pci_dvsec_dispatch_read;
+	ecap_perms[PCI_EXT_CAP_ID_DVSEC].writefn = vfio_pci_dvsec_dispatch_write;
 
 	if (ret)
 		vfio_pci_uninit_perm_bits();
