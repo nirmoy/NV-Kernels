@@ -288,8 +288,36 @@ static bool cxl_decode_regblock(struct pci_dev *pdev, u32 reg_lo, u32 reg_hi,
 	map->reg_type = reg_type;
 	map->resource = pci_resource_start(pdev, bar) + offset;
 	map->max_size = pci_resource_len(pdev, bar) - offset;
+	map->bar_index = bar;
+	map->bar_offset = offset;
 	return true;
 }
+
+/**
+ * cxl_regblock_get_bar_info() - Get BAR index and offset for a BAR-backed
+ * regblock
+ * @map: Register map from cxl_find_regblock() or cxl_find_regblock_instance()
+ * @bar_index: Output BAR index (0-5). Optional, may be NULL.
+ * @bar_offset: Output offset within the BAR. Optional, may be NULL.
+ *
+ * When the register block was found via the Register Locator DVSEC and
+ * lives in a PCI BAR (BIR 0-5), this returns the BAR index and the offset
+ * within that BAR.
+ *
+ * Return: 0 if the regblock is BAR-backed (bar_index <= 5), -EINVAL otherwise.
+ */
+int cxl_regblock_get_bar_info(const struct cxl_register_map *map, u8 *bar_index,
+			      resource_size_t *bar_offset)
+{
+	if (!map || map->bar_index == 0xff)
+		return -EINVAL;
+	if (bar_index)
+		*bar_index = map->bar_index;
+	if (bar_offset)
+		*bar_offset = map->bar_offset;
+	return 0;
+}
+EXPORT_SYMBOL_NS_GPL(cxl_regblock_get_bar_info, "CXL");
 
 /*
  * __cxl_find_regblock_instance() - Locate a register block or count instances by type / index
@@ -309,6 +337,7 @@ static int __cxl_find_regblock_instance(struct pci_dev *pdev, enum cxl_regloc_ty
 
 	*map = (struct cxl_register_map) {
 		.host = &pdev->dev,
+		.bar_index = 0xFF,
 		.resource = CXL_RESOURCE_NONE,
 	};
 
