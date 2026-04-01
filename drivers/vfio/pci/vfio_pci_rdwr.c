@@ -201,19 +201,29 @@ EXPORT_SYMBOL_GPL(vfio_pci_core_do_io_rw);
 int vfio_pci_core_setup_barmap(struct vfio_pci_core_device *vdev, int bar)
 {
 	struct pci_dev *pdev = vdev->pdev;
-	int ret;
+	int ret, bars;
 	void __iomem *io;
 
 	if (vdev->barmap[bar])
 		return 0;
 
-	ret = pci_request_selected_regions(pdev, 1 << bar, "vfio");
+	/*
+	 * The CXL component register BAR cannot be claimed exclusively: the
+	 * CXL subsystem holds persistent sub-range iomem claims during HDM
+	 * decoder setup. pci_request_selected_regions() for the full BAR
+	 * fails with EBUSY. Pass bars=0 to make the request a no-op and map
+	 * directly via pci_iomap().
+	 */
+	bars = (vdev->cxl && bar == vfio_cxl_get_component_reg_bar(vdev)) ?
+		0 : (1 << bar);
+
+	ret = pci_request_selected_regions(pdev, bars, "vfio");
 	if (ret)
 		return ret;
 
 	io = pci_iomap(pdev, bar, 0);
 	if (!io) {
-		pci_release_selected_regions(pdev, 1 << bar);
+		pci_release_selected_regions(pdev, bars);
 		return -ENOMEM;
 	}
 
