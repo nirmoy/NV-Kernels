@@ -15,6 +15,16 @@ Automatically rebases NVIDIA kernel branches onto the latest upstream stable tag
 
 When successful, creates rebased branches named `linux-nvidia-X.Y-vX.Y.Z` (e.g., `linux-nvidia-6.12-v6.12.65`).
 
+### patchscan.yml
+
+Checks that cherry-picked commits in a PR are not missing any upstream `Fixes:` patches. Runs on every PR targeting `24.04_linux-nvidia-6.17-next` and posts a comment listing any missing fixes, failing the check if any are found.
+
+Uses `origin/linux` as the upstream reference. The patchscan script and its dependencies are stored in `.github/scripts/` so no changes are needed on target branches.
+
+**Triggers:**
+- Automatically on pull requests targeting `24.04_linux-nvidia-6.17-next`
+- Manual dispatch (enter a PR number to scan)
+
 ### kernel-build.yml
 
 Builds and tests kernels with the following matrix:

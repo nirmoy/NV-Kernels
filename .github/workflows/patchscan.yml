@@ -1,0 +1,267 @@
+name: Patchscan - Check Missing Fixes
+
+on:
+  pull_request_target:
+    branches:
+      - 24.04_linux-nvidia-6.17-next
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to scan'
+        required: true
+        type: number
+
+jobs:
+  patchscan:
+    name: Check for missing upstream fixes
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - name: Get PR info (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        id: pr_info
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pr_json=$(gh api repos/${{ github.repository }}/pulls/${{ inputs.pr_number }})
+          echo "head_sha=$(echo "$pr_json" | jq -r .head.sha)" >> $GITHUB_OUTPUT
+          echo "base_sha=$(echo "$pr_json" | jq -r .base.sha)" >> $GITHUB_OUTPUT
+          echo "base_ref=$(echo "$pr_json" | jq -r .base.ref)" >> $GITHUB_OUTPUT
+          echo "pr_number=${{ inputs.pr_number }}" >> $GITHUB_OUTPUT
+
+      - name: Set PR variables
+        id: pr
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "head_sha=${{ steps.pr_info.outputs.head_sha }}" >> $GITHUB_OUTPUT
+            echo "base_sha=${{ steps.pr_info.outputs.base_sha }}" >> $GITHUB_OUTPUT
+            echo "base_ref=${{ steps.pr_info.outputs.base_ref }}" >> $GITHUB_OUTPUT
+            echo "pr_number=${{ steps.pr_info.outputs.pr_number }}" >> $GITHUB_OUTPUT
+          else
+            echo "head_sha=${{ github.event.pull_request.head.sha }}" >> $GITHUB_OUTPUT
+            echo "base_sha=${{ github.event.pull_request.base.sha }}" >> $GITHUB_OUTPUT
+            echo "base_ref=${{ github.base_ref }}" >> $GITHUB_OUTPUT
+            echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.base_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch PR commits
+        run: |
+          git fetch --no-tags origin \
+            ${{ steps.pr.outputs.base_sha }}:refs/remotes/origin/patchscan-base \
+            refs/pull/${{ steps.pr.outputs.pr_number }}/head:refs/remotes/origin/patchscan-head
+
+      - name: Fetch patchscan from github-actions branch
+        run: |
+          git fetch origin github-actions
+          git checkout origin/github-actions -- .github/scripts/patchscan .github/scripts/requirements.txt
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: .github/scripts/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r .github/scripts/requirements.txt
+
+      - name: Fetch origin/linux branch (used as upstream reference)
+        run: |
+          git fetch origin linux
+
+      - name: Run patchscan
+        id: patchscan
+        run: |
+          base_sha="${{ steps.pr.outputs.base_sha }}"
+          head_sha="${{ steps.pr.outputs.head_sha }}"
+          merge_base="$(git merge-base "$base_sha" "$head_sha")"
+          range="${merge_base}..${head_sha}"
+          echo "Merge base: $merge_base"
+          echo "Scanning commit range: $range"
+          echo "Upstream: origin/linux"
+
+          # Run patchscan, capture output; use PIPESTATUS to get patchscan's exit code, not tee's
+          set +e
+          set -o pipefail
+          python3 .github/scripts/patchscan \
+            "$range" \
+            origin \
+            linux \
+            --no-update \
+            2>&1 | tee patchscan_output.txt
+          exit_code=${PIPESTATUS[0]}
+          set +o pipefail
+          set -e
+
+          # Strip ANSI escape codes for the summary
+          sed 's/\x1B\[[0-9;]*[A-Za-z]//g; s/\x1B\]8;;[^\x1B]*\x1B\\//g; s/\x1B\]8;;[^\a]*\a//g' \
+            patchscan_output.txt > patchscan_clean.txt
+
+          # Record runtime errors so the comment step can report them before failing
+          if [ $exit_code -ne 0 ]; then
+            echo "fixes_found=error" >> $GITHUB_OUTPUT
+          fi
+
+          # Check if missing fixes or scan errors were found
+          if grep -qE "^W:|^E:|Fixes for" patchscan_clean.txt; then
+            echo "fixes_found=true" >> $GITHUB_OUTPUT
+          else
+            echo "fixes_found=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Post PR comment on patchscan error
+        if: steps.patchscan.outputs.fixes_found == 'error'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const output = fs.readFileSync('patchscan_clean.txt', 'utf8');
+            const MAX_LEN = 60000;
+            const truncated = output.length > MAX_LEN
+              ? output.slice(0, MAX_LEN) + '\n...(truncated)'
+              : output;
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ steps.pr.outputs.pr_number }},
+              per_page: 100,
+            });
+            const existing = comments.find(c =>
+              c.user.login === 'github-actions[bot]' &&
+              c.body.includes('Patchscan:')
+            );
+
+            const body = [
+              '## :x: Patchscan: Scan Error',
+              '',
+              'Patchscan encountered an error while scanning this PR:',
+              '',
+              '````',
+              truncated.trim(),
+              '````',
+            ].join('\n');
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: ${{ steps.pr.outputs.pr_number }},
+                body: body,
+              });
+            }
+
+      - name: Post PR comment with missing fixes
+        if: steps.patchscan.outputs.fixes_found == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const output = fs.readFileSync('patchscan_clean.txt', 'utf8');
+
+            // Find existing patchscan comment to update instead of spamming
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ steps.pr.outputs.pr_number }},
+              per_page: 100,
+            });
+            const existing = comments.find(c =>
+              c.user.login === 'github-actions[bot]' &&
+              c.body.includes('Patchscan:')
+            );
+
+            // Sanitize output: escape fence sequences and truncate to stay under GitHub's comment limit
+            const MAX_LEN = 60000;
+            const safeOutput = output.replace(/`{3,}/g, '` ` `');
+            const truncated = safeOutput.length > MAX_LEN
+              ? safeOutput.slice(0, MAX_LEN) + '\n...(truncated)'
+              : safeOutput;
+
+            const body = [
+              '## :warning: Patchscan: Missing Fixes Detected',
+              '',
+              'The following upstream fix commits appear to be missing from this PR:',
+              '',
+              '````',
+              truncated.trim(),
+              '````',
+              '',
+              'Please review and consider including them.',
+            ].join('\n');
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: ${{ steps.pr.outputs.pr_number }},
+                body: body,
+              });
+            }
+
+      - name: Post all-clear comment
+        if: steps.patchscan.outputs.fixes_found == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ steps.pr.outputs.pr_number }},
+              per_page: 100,
+            });
+            const existing = comments.find(c =>
+              c.user.login === 'github-actions[bot]' &&
+              c.body.includes('Patchscan:')
+            );
+
+            const body = '## :white_check_mark: Patchscan: No Missing Fixes\n\nAll cherry-picked commits have been checked — no missing upstream fixes found.';
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: ${{ steps.pr.outputs.pr_number }},
+                body: body,
+              });
+            }
+
+      - name: Fail if missing fixes found or scan error
+        if: steps.patchscan.outputs.fixes_found == 'true' || steps.patchscan.outputs.fixes_found == 'error'
+        run: |
+          if [ "${{ steps.patchscan.outputs.fixes_found }}" = "error" ]; then
+            echo "::error::Patchscan encountered a runtime error — see PR comment for details."
+          else
+            echo "::warning::Missing upstream fixes detected — see PR comment for details."
+          fi
+          exit 1
