@@ -106,14 +106,14 @@ jobs:
           sed 's/\x1B\[[0-9;]*[A-Za-z]//g; s/\x1B\]8;;[^\x1B]*\x1B\\//g; s/\x1B\]8;;[^\a]*\a//g' \
             patchscan_output.txt > patchscan_clean.txt
 
-          # Record runtime errors so the comment step can report them before failing
-          if [ $exit_code -ne 0 ]; then
-            echo "fixes_found=error" >> $GITHUB_OUTPUT
-          fi
-
-          # Check if missing fixes or scan errors were found
-          if grep -qE "^W:|^E:|Fixes for" patchscan_clean.txt; then
+          # Classify the outcome — order matters: W: (missing fixes) takes priority,
+          # then E: / non-zero exit (verification errors), then all-clear.
+          # Writing fixes_found twice to GITHUB_OUTPUT would make the last write win,
+          # so use a single mutually-exclusive block.
+          if grep -qE "^W:|Fixes for" patchscan_clean.txt; then
             echo "fixes_found=true" >> $GITHUB_OUTPUT
+          elif grep -qE "^E:" patchscan_clean.txt || [ $exit_code -ne 0 ]; then
+            echo "fixes_found=error" >> $GITHUB_OUTPUT
           else
             echo "fixes_found=false" >> $GITHUB_OUTPUT
           fi
@@ -142,9 +142,12 @@ jobs:
             );
 
             const body = [
-              '## :x: Patchscan: Scan Error',
+              '## :x: Patchscan: Upstream Verification Error',
               '',
-              'Patchscan encountered an error while scanning this PR:',
+              'Patchscan could not fully verify one or more commits in this PR.',
+              'This is often a false positive caused by a SAUCE commit whose message',
+              'body references an upstream SHA but has a different title.',
+              'No `Fixes:` patches appear to be missing.',
               '',
               '````',
               truncated.trim(),
@@ -260,7 +263,7 @@ jobs:
         if: steps.patchscan.outputs.fixes_found == 'true' || steps.patchscan.outputs.fixes_found == 'error'
         run: |
           if [ "${{ steps.patchscan.outputs.fixes_found }}" = "error" ]; then
-            echo "::error::Patchscan encountered a runtime error — see PR comment for details."
+            echo "::error::Patchscan upstream verification error — see PR comment for details."
           else
             echo "::warning::Missing upstream fixes detected — see PR comment for details."
           fi
