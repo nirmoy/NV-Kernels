@@ -30,9 +30,10 @@ def get_src_commit_strs(msg):
     # Match common backport/cherry-pick annotations:
     #   (cherry picked from commit <sha>)
     #   (backported from commit <sha>)
-    #   upstream commit <sha>
-    #   Upstream commit <sha>
-    matches = list(re.finditer(r"(?:from commit|[Uu]pstream commit) ([a-fA-F0-9]+)", msg))
+    #   Upstream commit <sha>  (only at start of line, used as a trailer)
+    # Note: "upstream commit <sha>" embedded in prose is intentionally NOT matched
+    # to avoid false positives from commits that reference upstream SHAs informally.
+    matches = list(re.finditer(r"(?:from commit|^[Uu]pstream commit) ([a-fA-F0-9]+)", msg, re.MULTILINE))
     return list(map(lambda m: m.group(1) if len(m.groups()) == 1 else None, matches))
 
 def references_upstream(commit):
