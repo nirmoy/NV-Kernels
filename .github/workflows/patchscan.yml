@@ -141,12 +141,13 @@ jobs:
 
           # Classify the outcome:
           # 1. W: or "Fixes for" lines  → missing fixes found
-          # 2. "All fixes:" present      → patchscan completed; empty section means
-          #                                no missing fixes (SHA-resolution E: lines
-          #                                are false positives for VR/intra-tree picks)
-          # 3. Neither                   → patchscan crashed before finishing
+          # 2. Non-zero exit            → verification failure
+          # 3. "All fixes:" present     → patchscan completed with no missing fixes
+          # 4. Neither                  → patchscan crashed before finishing
           if grep -qE "^W:|Fixes for" patchscan_clean.txt; then
             echo "fixes_found=true" >> $GITHUB_OUTPUT
+          elif [ $exit_code -ne 0 ]; then
+            echo "fixes_found=error" >> $GITHUB_OUTPUT
           elif grep -q "^All fixes:" patchscan_clean.txt; then
             echo "fixes_found=false" >> $GITHUB_OUTPUT
           else
@@ -197,6 +198,17 @@ jobs:
           script: |
             const fs = require('fs');
             const safeRead = (f) => fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '(no output captured)';
+            const truncateOutput = (raw) =>
+              raw.length > 30000 ? raw.slice(0, 30000) + '\n...(truncated)' : raw;
+            const escapeHtml = (s) =>
+              s
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+            const renderDetails = (raw) => {
+              const escaped = escapeHtml(truncateOutput(raw).trim());
+              return '<details><summary>Details</summary>\n\n<pre>' + escaped + '</pre>\n\n</details>';
+            };
 
             // --- Patchscan section ---
             const psResult = '${{ steps.patchscan.outputs.fixes_found }}' || 'error';
@@ -209,14 +221,12 @@ jobs:
               psIcon = ':warning:';
               psHeading = 'Missing Fixes Detected';
               const raw = safeRead('patchscan_clean.txt');
-              const truncated = raw.length > 30000 ? raw.slice(0, 30000) + '\n...(truncated)' : raw;
-              psBody = 'The following upstream fix commits appear to be missing:\n\n<details><summary>Details</summary>\n\n````\n' + truncated.trim() + '\n````\n\n</details>';
+              psBody = 'The following upstream fix commits appear to be missing:\n\n' + renderDetails(raw);
             } else {
               psIcon = ':x:';
               psHeading = 'Upstream Verification Error';
               const raw = safeRead('patchscan_clean.txt');
-              const truncated = raw.length > 30000 ? raw.slice(0, 30000) + '\n...(truncated)' : raw;
-              psBody = 'Could not verify one or more commits (often a false positive for SAUCE commits).\n\n<details><summary>Details</summary>\n\n````\n' + truncated.trim() + '\n````\n\n</details>';
+              psBody = 'Could not verify one or more commits (often a false positive for SAUCE commits).\n\n' + renderDetails(raw);
             }
 
             // --- validate-pr section ---
@@ -226,20 +236,17 @@ jobs:
               valIcon = ':white_check_mark:';
               valHeading = 'All checks passed';
               const raw = safeRead('validate_clean.txt');
-              const truncated = raw.length > 30000 ? raw.slice(0, 30000) + '\n...(truncated)' : raw;
-              valBody = '<details><summary>Details</summary>\n\n````\n' + truncated.trim() + '\n````\n\n</details>';
+              valBody = renderDetails(raw);
             } else if (valResult === 'warn') {
               valIcon = ':warning:';
               valHeading = 'Warnings';
               const raw = safeRead('validate_clean.txt');
-              const truncated = raw.length > 30000 ? raw.slice(0, 30000) + '\n...(truncated)' : raw;
-              valBody = '<details><summary>Details</summary>\n\n````\n' + truncated.trim() + '\n````\n\n</details>';
+              valBody = renderDetails(raw);
             } else {
               valIcon = ':x:';
               valHeading = 'Errors found';
               const raw = safeRead('validate_clean.txt');
-              const truncated = raw.length > 30000 ? raw.slice(0, 30000) + '\n...(truncated)' : raw;
-              valBody = '<details><summary>Details</summary>\n\n````\n' + truncated.trim() + '\n````\n\n</details>';
+              valBody = renderDetails(raw);
             }
 
             const body = [

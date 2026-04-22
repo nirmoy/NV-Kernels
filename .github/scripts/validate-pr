@@ -196,7 +196,7 @@ def lint_commits(commits):
     errors   = []
 
     SAUCE_PREFIX_RE = re.compile(
-        r'^NVIDIA:(\s+VR:|(\s+[A-Z][A-Z0-9]+:))?\s+SAUCE:')
+        r'^NVIDIA:(\s+VR:)?(\s+[A-Z][A-Z0-9]+:)?\s+SAUCE:')
 
     for commit in commits:
         sha12   = commit.hexsha[:12]
