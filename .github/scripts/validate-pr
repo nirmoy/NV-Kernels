@@ -1,0 +1,347 @@
+#!/usr/bin/python3
+from argparse import ArgumentParser
+from colorama import Fore
+import git
+import os
+import re
+import subprocess
+import sys
+
+parser = ArgumentParser(
+    description="Validates PR commit hygiene and PR metadata.")
+parser.add_argument("check_range",
+    help="Git commit range, e.g. origin/base..origin/head")
+parser.add_argument("upstream_remote",
+    help="Remote containing upstream branch, e.g. origin")
+parser.add_argument("upstream_branch",
+    help="Upstream branch name, e.g. linux")
+parser.add_argument("--no-update", action="store_true",
+    help="Skip git fetch")
+parser.add_argument("--pr-title", default=None,
+    help="PR title string (enables title check)")
+parser.add_argument("--pr-body", default=None,
+    help="Path to file containing PR body (enables body checks)")
+parser.add_argument("--base-branch", default=None,
+    help="Target branch name (used for BugLink requirement)")
+args = parser.parse_args()
+
+
+def get_cherry_pick_sha(message):
+    m = re.search(r'\(cherry picked from commit ([a-fA-F0-9]+)\)', message)
+    return m.group(1) if m else None
+
+def get_backport_url(message):
+    m = re.search(r'\(backported from (https?://[^\)]+)\)', message)
+    return m.group(1) if m else None
+
+def is_sauce(subject):
+    return bool(re.match(r'^NVIDIA:.*SAUCE:', subject))
+
+def is_revert(subject):
+    return subject.startswith('Revert "')
+
+def is_merge_commit(commit):
+    return len(commit.parents) > 1
+
+def subject_of(commit):
+    return commit.message.split('\n')[0]
+
+def get_sob_lines(message):
+    return re.findall(r'^Signed-off-by:.*$', message, re.MULTILINE)
+
+
+def get_patch_id(commit):
+    """Return the stable patch-ID string for a commit, or None on failure."""
+    show = subprocess.run(
+        ['git', 'show', commit.hexsha],
+        capture_output=True,
+        cwd=commit.repo.working_dir,
+    )
+    pid = subprocess.run(
+        ['git', 'patch-id', '--stable'],
+        input=show.stdout,
+        capture_output=True,
+        cwd=commit.repo.working_dir,
+    )
+    if pid.returncode == 0 and pid.stdout:
+        parts = pid.stdout.decode().strip().split()
+        if parts:
+            return parts[0]
+    return None
+
+
+def describe_sob_chain(local_commit, upstream_commit):
+    """Return a human-readable SoB chain status string."""
+    local_sobs = get_sob_lines(local_commit.message)
+    upstream_sobs = get_sob_lines(upstream_commit.message)
+    missing = [s for s in upstream_sobs if s not in local_sobs]
+    if missing:
+        short = missing[0][len('Signed-off-by: '):].split('<')[0].strip()[:20]
+        return "MISSING: {}".format(short)
+    added = [s for s in local_sobs if s not in upstream_sobs]
+    if not added:
+        return "preserved"
+    names = []
+    for s in added:
+        m = re.match(r'Signed-off-by:\s+\S.*<([^@>]+)', s)
+        names.append(m.group(1).split('.')[-1][:8] if m else '?')
+    return "preserved + {} added".format(' '.join(names))
+
+
+COL_WIDTHS = [12, 19, 8, 7, 25]
+HEADERS    = ['Local', 'Referenced upstream', 'Patch-ID', 'Subject', 'SoB chain']
+
+def _hline(left, sep, right):
+    return left + sep.join('─' * (w + 2) for w in COL_WIDTHS) + right
+
+def _row_line(cells):
+    return '│ ' + ' │ '.join(
+        str(c)[:w].ljust(w) for c, w in zip(cells, COL_WIDTHS)
+    ) + ' │'
+
+def print_digest_table(rows):
+    """Print a Unicode box-drawing table of cherry-pick digest rows.
+
+    Each row dict: local, upstream, patch_id, subject, sob, error (bool).
+    """
+    print(_hline('┌', '┬', '┐'))
+    print(_row_line(HEADERS))
+    for row in rows:
+        print(_hline('├', '┼', '┤'))
+        cells = [row['local'], row['upstream'],
+                 row['patch_id'], row['subject'], row['sob']]
+        line = _row_line(cells)
+        if row.get('error'):
+            print(Fore.RED + line + Fore.RESET)
+        else:
+            print(Fore.GREEN + line + Fore.RESET)
+    print(_hline('└', '┴', '┘'))
+
+
+def build_digest(commits, repo, upstream_remote=None):
+    """For commits with cherry-pick trailers, build digest rows and E: messages."""
+    rows = []
+    errors = []
+
+    for commit in commits:
+        src_sha = get_cherry_pick_sha(commit.message)
+        if src_sha is None:
+            continue
+
+        local_sha12    = commit.hexsha[:12]
+        upstream_sha12 = src_sha[:12]
+
+        # Resolve upstream commit — try local object store first, then a
+        # targeted fetch (GitHub allows fetching any reachable SHA by ID).
+        upstream = None
+        try:
+            upstream = repo.commit(src_sha)
+        except Exception:
+            if upstream_remote:
+                try:
+                    repo.git.fetch(upstream_remote, src_sha)
+                    upstream = repo.commit(src_sha)
+                except Exception:
+                    pass
+
+        if upstream is None:
+            errors.append("E: {} (\"{}\"): cannot resolve upstream SHA {}".format(
+                local_sha12, subject_of(commit)[:40], upstream_sha12))
+            rows.append(dict(local=local_sha12, upstream=upstream_sha12,
+                             patch_id='ERROR', subject='ERROR', sob='ERROR',
+                             error=True))
+            continue
+
+        # Patch-ID
+        local_pid    = get_patch_id(commit)
+        upstream_pid = get_patch_id(upstream)
+        if local_pid and upstream_pid and local_pid == upstream_pid:
+            pid_status = 'match'
+            pid_error  = False
+        else:
+            pid_status = 'MISMATCH'
+            pid_error  = True
+            errors.append("E: {} (\"{}\"): patch-ID mismatch with upstream {}".format(
+                local_sha12, subject_of(commit)[:40], upstream_sha12))
+
+        # Subject
+        local_subj    = subject_of(commit)
+        upstream_subj = subject_of(upstream)
+        if local_subj == upstream_subj:
+            subj_status = 'match'
+            subj_error  = False
+        else:
+            subj_status = 'MISMATCH'
+            subj_error  = True
+            errors.append("E: {} (\"{}\"): subject differs from upstream \"{}\"".format(
+                local_sha12, local_subj[:40], upstream_subj[:40]))
+
+        sob_status = describe_sob_chain(commit, upstream)
+        sob_error  = sob_status.startswith('MISSING')
+        if sob_error:
+            errors.append("E: {} (\"{}\"): SoB chain problem: {}".format(
+                local_sha12, subject_of(commit)[:40], sob_status))
+
+        has_error = pid_error or subj_error or sob_error
+        rows.append(dict(local=local_sha12, upstream=upstream_sha12,
+                         patch_id=pid_status, subject=subj_status,
+                         sob=sob_status, error=has_error))
+
+    return rows, errors
+
+
+def lint_commits(commits):
+    """Run per-commit lint checks. Returns (warnings, errors) as lists of strings."""
+    warnings = []
+    errors   = []
+
+    SAUCE_PREFIX_RE = re.compile(
+        r'^NVIDIA:(\s+VR:|(\s+[A-Z][A-Z0-9]+:))?\s+SAUCE:')
+
+    for commit in commits:
+        sha12   = commit.hexsha[:12]
+        subject = subject_of(commit)
+        label   = '{} ("{}")'.format(sha12, subject[:50])
+
+        # R8: no merge commits
+        if is_merge_commit(commit):
+            errors.append("E: {}: merge commit in PR range".format(label))
+            continue  # skip further checks on merge commits
+
+        sobs = get_sob_lines(commit.message)
+
+        # R5: Signed-off-by required
+        if not sobs:
+            errors.append("E: {}: missing Signed-off-by trailer".format(label))
+
+        # Classification for R6/R7/R9/R10
+        sauce   = is_sauce(subject)
+        revert  = is_revert(subject)
+
+        # R9: subject length — exempt SAUCE and Reverts of SAUCE; the mandatory
+        # "NVIDIA: [VR: ]SAUCE:" prefix already consumes 15–20 characters.
+        revert_of_sauce = revert and bool(re.match(r'^Revert "NVIDIA:.*SAUCE:', subject))
+        if len(subject) > 72 and not sauce and not revert_of_sauce:
+            warnings.append("W: {}: subject {} chars (>72)".format(label, len(subject)))
+        cp_sha  = get_cherry_pick_sha(commit.message)
+        bp_url  = get_backport_url(commit.message)
+
+        # R6: non-SAUCE, non-Revert commits must have an upstream reference trailer
+        if not sauce and not revert and cp_sha is None and bp_url is None:
+            errors.append(
+                "E: {}: not SAUCE/Revert but has no upstream reference trailer"
+                " (cherry picked from commit ... or backported from ...)".format(label))
+
+        # R7: detect wrong trailer for LKML in-review backports
+        # Heuristic: SAUCE commit whose message contains a lore.kernel.org URL
+        # but uses (cherry picked from commit <sha>) instead of (backported from <url>)
+        if sauce and cp_sha is not None:
+            if re.search(r'lore\.kernel\.org|patchwork\.kernel\.org', commit.message):
+                warnings.append(
+                    "W: {}: LKML-in-review backport should use"
+                    " '(backported from <url>)' not '(cherry picked from commit ...)'".format(label))
+
+        # R10: SAUCE prefix canonicality
+        if sauce and not SAUCE_PREFIX_RE.match(subject):
+            warnings.append(
+                "W: {}: non-canonical SAUCE prefix (expected 'NVIDIA: [VR: ][VENDOR: ]SAUCE:')".format(label))
+
+    return warnings, errors
+
+
+TRACKED_BRANCH_RE = re.compile(r'^(24|26)\.04_linux-nvidia')
+
+def check_pr_metadata(pr_title, pr_body_path, base_branch):
+    """Check PR title and body for required fields. Returns (warnings, errors)."""
+    warnings = []
+    errors   = []
+
+    # R1: title must start with [<branch>] unless exempted
+    exempt_base  = base_branch in ('github-actions',) if base_branch else False
+    exempt_title = pr_title.startswith('TEST:') if pr_title else False
+    if pr_title and not exempt_base and not exempt_title:
+        if not pr_title.startswith('['):
+            warnings.append(
+                "W: PR title missing [<branch>] prefix: \"{}\"".format(pr_title[:80]))
+
+    # R3: BugLink required for tracked branches
+    if pr_body_path and base_branch and TRACKED_BRANCH_RE.match(base_branch):
+        try:
+            body = open(pr_body_path).read()
+        except OSError as e:
+            errors.append("E: cannot read --pr-body {}: {}".format(pr_body_path, e))
+            body = ''
+        buglink_re = re.compile(
+            r'^(?:BugLink:|LP:)\s+https://bugs\.launchpad\.net/', re.MULTILINE)
+        if not buglink_re.search(body):
+            errors.append(
+                "E: PR targets {} but body has no 'BugLink:' or 'LP:'"
+                " https://bugs.launchpad.net/... line".format(base_branch))
+
+    return warnings, errors
+
+
+def main():
+    repo = git.Repo(os.getcwd())
+    assert not repo.bare
+
+    commits = list(repo.iter_commits(args.check_range))
+    if not commits:
+        print("No commits in range {}; nothing to check.".format(args.check_range))
+        return
+
+    upstream_ref = "{}/{}".format(args.upstream_remote, args.upstream_branch)
+    assert upstream_ref in repo.git.branch('-r'), \
+        "Upstream ref {} not found".format(upstream_ref)
+
+    if not args.no_update:
+        print("Fetching upstream {}...".format(upstream_ref))
+        repo.remote(args.upstream_remote).fetch(args.upstream_branch)
+
+    print("Checking {} commits...\n".format(len(commits)))
+
+    all_errors = []
+
+    # --- Cherry-pick digest ---
+    digest_rows, digest_errors = build_digest(commits, repo, args.upstream_remote)
+    if digest_rows:
+        print("Cherry-pick digest:")
+        for msg in digest_errors:
+            print(Fore.RED + msg + Fore.RESET)
+        print_digest_table(digest_rows)
+        print()
+    all_errors.extend(digest_errors)
+
+    # --- Per-commit lint ---
+    lint_warnings, lint_errors = lint_commits(commits)
+    if lint_warnings or lint_errors:
+        print("Lint results:")
+        for msg in lint_warnings:
+            print(Fore.YELLOW + msg + Fore.RESET)
+        for msg in lint_errors:
+            print(Fore.RED + msg + Fore.RESET)
+        print()
+    else:
+        print(Fore.GREEN + "Lint: all checks passed." + Fore.RESET)
+        print()
+    all_errors.extend(lint_errors)
+
+    # --- PR metadata ---
+    if args.pr_title or args.pr_body:
+        meta_warnings, meta_errors = check_pr_metadata(
+            args.pr_title, args.pr_body, args.base_branch)
+        if meta_warnings or meta_errors:
+            print("PR metadata:")
+            for msg in meta_warnings:
+                print(Fore.YELLOW + msg + Fore.RESET)
+            for msg in meta_errors:
+                print(Fore.RED + msg + Fore.RESET)
+            print()
+        all_errors.extend(meta_errors)
+
+    if all_errors:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
