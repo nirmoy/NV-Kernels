@@ -91,6 +91,18 @@ def describe_sob_chain(local_commit, upstream_commit):
     return "preserved + {} added".format(' '.join(names))
 
 
+def describe_sob_simple(message):
+    """Return SoB status for a commit with no upstream to compare against."""
+    sobs = get_sob_lines(message)
+    if not sobs:
+        return 'MISSING'
+    names = []
+    for s in sobs:
+        m = re.match(r'Signed-off-by:\s+\S.*<([^@>]+)', s)
+        names.append(m.group(1).split('.')[-1][:8] if m else '?')
+    return ', '.join(names)
+
+
 def describe_sob_chain_backport(message):
     """Check SOB ordering for a (backported from <url>) commit.
 
@@ -317,11 +329,23 @@ def build_digest(commits, repo, upstream_remote=None):
             subj        = subject_of(commit)
             if is_merge_commit(commit):
                 continue  # merge commits handled by lint; don't clutter the table
-            kind = 'Revert' if is_revert(subj) else 'SAUCE'
+            if is_revert(subj):
+                kind = 'Revert'
+                # Strip outer Revert "..." wrapper and SAUCE prefix for display
+                inner = re.sub(r'^Revert\s+"', '', subj).rstrip('"')
+                display = _norm_sauce_subject(inner) or inner
+            else:
+                kind    = 'SAUCE'
+                display = _norm_sauce_subject(subj) or subj
+            sob_status = describe_sob_simple(commit.message)
+            sob_error  = sob_status == 'MISSING'
+            if sob_error:
+                errors.append("E: {} (\"{}\"): missing Signed-off-by".format(
+                    local_sha12, subj[:50]))
             rows.append(dict(local=local_sha12,
-                             upstream=kind,
+                             upstream='[{}] {}'.format(kind, display),
                              patch_id='N/A', subject='N/A',
-                             sob='N/A', error=False))
+                             sob=sob_status, error=sob_error))
             continue
 
         # --- backported-from: check SOB order + compare diff against lore patch ---
