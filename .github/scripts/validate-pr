@@ -311,7 +311,17 @@ def build_digest(commits, repo, upstream_remote=None):
         src_sha = get_cherry_pick_sha(commit.message)
         bp_url  = get_backport_url(commit.message)
 
+        # --- SAUCE / Revert: no upstream reference, show as informational row ---
         if src_sha is None and bp_url is None:
+            local_sha12 = commit.hexsha[:12]
+            subj        = subject_of(commit)
+            if is_merge_commit(commit):
+                continue  # merge commits handled by lint; don't clutter the table
+            kind = 'Revert' if is_revert(subj) else 'SAUCE'
+            rows.append(dict(local=local_sha12,
+                             upstream=kind,
+                             patch_id='N/A', subject='N/A',
+                             sob='N/A', error=False))
             continue
 
         # --- backported-from: check SOB order + compare diff against lore patch ---
