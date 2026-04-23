@@ -1,4 +1,4 @@
-name: Patchscan - Check Missing Fixes
+name: PR Validation
 
 on:
   pull_request_target:
@@ -12,10 +12,14 @@ on:
         description: 'PR number to scan'
         required: true
         type: number
+      repo:
+        description: 'Repo containing the PR (owner/repo). Leave empty for this repo.'
+        required: false
+        type: string
 
 jobs:
   patchscan:
-    name: Check for missing upstream fixes
+    name: Patchscan + PR lint
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
@@ -27,11 +31,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          pr_json=$(gh api repos/${{ github.repository }}/pulls/${{ inputs.pr_number }})
+          pr_repo="${{ inputs.repo || github.repository }}"
+          pr_json=$(gh api repos/${pr_repo}/pulls/${{ inputs.pr_number }})
           echo "head_sha=$(echo "$pr_json" | jq -r .head.sha)" >> $GITHUB_OUTPUT
           echo "base_sha=$(echo "$pr_json" | jq -r .base.sha)" >> $GITHUB_OUTPUT
           echo "base_ref=$(echo "$pr_json" | jq -r .base.ref)" >> $GITHUB_OUTPUT
           echo "pr_number=${{ inputs.pr_number }}" >> $GITHUB_OUTPUT
+          echo "pr_repo=${pr_repo}" >> $GITHUB_OUTPUT
 
       - name: Set PR variables
         id: pr
@@ -41,11 +47,13 @@ jobs:
             echo "base_sha=${{ steps.pr_info.outputs.base_sha }}" >> $GITHUB_OUTPUT
             echo "base_ref=${{ steps.pr_info.outputs.base_ref }}" >> $GITHUB_OUTPUT
             echo "pr_number=${{ steps.pr_info.outputs.pr_number }}" >> $GITHUB_OUTPUT
+            echo "pr_repo=${{ steps.pr_info.outputs.pr_repo }}" >> $GITHUB_OUTPUT
           else
             echo "head_sha=${{ github.event.pull_request.head.sha }}" >> $GITHUB_OUTPUT
             echo "base_sha=${{ github.event.pull_request.base.sha }}" >> $GITHUB_OUTPUT
             echo "base_ref=${{ github.base_ref }}" >> $GITHUB_OUTPUT
             echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+            echo "pr_repo=${{ github.repository }}" >> $GITHUB_OUTPUT
           fi
 
       - name: Checkout base branch
@@ -57,14 +65,37 @@ jobs:
 
       - name: Fetch PR commits
         run: |
-          git fetch --no-tags origin \
+          pr_repo="${{ steps.pr.outputs.pr_repo }}"
+          if [ "$pr_repo" = "${{ github.repository }}" ]; then
+            fetch_remote="origin"
+          else
+            git remote add pr-upstream "https://github.com/${pr_repo}.git"
+            fetch_remote="pr-upstream"
+          fi
+          git fetch --no-tags "$fetch_remote" \
             ${{ steps.pr.outputs.base_sha }}:refs/remotes/origin/patchscan-base \
             refs/pull/${{ steps.pr.outputs.pr_number }}/head:refs/remotes/origin/patchscan-head
 
-      - name: Fetch patchscan from github-actions branch
+      - name: Write PR title and body to files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            pr_json=$(gh api repos/${{ steps.pr.outputs.pr_repo }}/pulls/${{ steps.pr.outputs.pr_number }})
+            echo "$pr_json" | jq -r '.title' > pr_title.txt
+            echo "$pr_json" | jq -r '.body // ""' > pr_body.txt
+          else
+            printf '%s' "${{ github.event.pull_request.title }}" > pr_title.txt
+            printf '%s' "${{ github.event.pull_request.body }}" > pr_body.txt
+          fi
+
+      - name: Fetch scripts from github-actions branch
         run: |
           git fetch origin github-actions
-          git checkout origin/github-actions -- .github/scripts/patchscan .github/scripts/requirements.txt
+          git checkout origin/github-actions -- \
+            .github/scripts/patchscan \
+            .github/scripts/validate-pr \
+            .github/scripts/requirements.txt
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -108,165 +139,163 @@ jobs:
           sed 's/\x1B\[[0-9;]*[A-Za-z]//g; s/\x1B\]8;;[^\x1B]*\x1B\\//g; s/\x1B\]8;;[^\a]*\a//g' \
             patchscan_output.txt > patchscan_clean.txt
 
-          # Classify the outcome — order matters: W: (missing fixes) takes priority,
-          # then E: / non-zero exit (verification errors), then all-clear.
-          # Writing fixes_found twice to GITHUB_OUTPUT would make the last write win,
-          # so use a single mutually-exclusive block.
-          if grep -qE "^W:|Fixes for" patchscan_clean.txt; then
+          # Classify the outcome:
+          # 1. "Fixes for" lines after "All fixes:" → missing fixes found
+          # 2. "All fixes:" with no entries         → no missing fixes
+          # 3. No "All fixes:" marker              → patchscan crashed before finishing
+          if awk '
+            /^All fixes:/ { in_all_fixes = 1; next }
+            in_all_fixes && /^Fixes for / { found = 1; exit 0 }
+            END { exit found ? 0 : 1 }
+          ' patchscan_clean.txt; then
             echo "fixes_found=true" >> $GITHUB_OUTPUT
-          elif grep -qE "^E:" patchscan_clean.txt || [ $exit_code -ne 0 ]; then
-            echo "fixes_found=error" >> $GITHUB_OUTPUT
-          else
+          elif grep -q "^All fixes:" patchscan_clean.txt; then
             echo "fixes_found=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Post PR comment on patchscan error
-        if: steps.patchscan.outputs.fixes_found == 'error'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const output = fs.readFileSync('patchscan_clean.txt', 'utf8');
-            const MAX_LEN = 60000;
-            const truncated = output.length > MAX_LEN
-              ? output.slice(0, MAX_LEN) + '\n...(truncated)'
-              : output;
-
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: ${{ steps.pr.outputs.pr_number }},
-              per_page: 100,
-            });
-            const existing = comments.find(c =>
-              c.user.login === 'github-actions[bot]' &&
-              c.body.includes('Patchscan:')
-            );
-
-            const body = [
-              '## :x: Patchscan: Upstream Verification Error',
-              '',
-              'Patchscan could not fully verify one or more commits in this PR.',
-              'This is often a false positive caused by a SAUCE commit whose message',
-              'body references an upstream SHA but has a different title.',
-              'No `Fixes:` patches appear to be missing.',
-              '',
-              '````',
-              truncated.trim(),
-              '````',
-            ].join('\n');
-
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existing.id,
-                body: body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: ${{ steps.pr.outputs.pr_number }},
-                body: body,
-              });
-            }
-
-      - name: Post PR comment with missing fixes
-        if: steps.patchscan.outputs.fixes_found == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const output = fs.readFileSync('patchscan_clean.txt', 'utf8');
-
-            // Find existing patchscan comment to update instead of spamming
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: ${{ steps.pr.outputs.pr_number }},
-              per_page: 100,
-            });
-            const existing = comments.find(c =>
-              c.user.login === 'github-actions[bot]' &&
-              c.body.includes('Patchscan:')
-            );
-
-            // Sanitize output: escape fence sequences and truncate to stay under GitHub's comment limit
-            const MAX_LEN = 60000;
-            const safeOutput = output.replace(/`{3,}/g, '` ` `');
-            const truncated = safeOutput.length > MAX_LEN
-              ? safeOutput.slice(0, MAX_LEN) + '\n...(truncated)'
-              : safeOutput;
-
-            const body = [
-              '## :warning: Patchscan: Missing Fixes Detected',
-              '',
-              'The following upstream fix commits appear to be missing from this PR:',
-              '',
-              '````',
-              truncated.trim(),
-              '````',
-              '',
-              'Please review and consider including them.',
-            ].join('\n');
-
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existing.id,
-                body: body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: ${{ steps.pr.outputs.pr_number }},
-                body: body,
-              });
-            }
-
-      - name: Post all-clear comment
-        if: steps.patchscan.outputs.fixes_found == 'false'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const comments = await github.paginate(github.rest.issues.listComments, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: ${{ steps.pr.outputs.pr_number }},
-              per_page: 100,
-            });
-            const existing = comments.find(c =>
-              c.user.login === 'github-actions[bot]' &&
-              c.body.includes('Patchscan:')
-            );
-
-            const body = '## :white_check_mark: Patchscan: No Missing Fixes\n\nAll cherry-picked commits have been checked — no missing upstream fixes found.';
-
-            if (existing) {
-              await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                comment_id: existing.id,
-                body: body,
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: ${{ steps.pr.outputs.pr_number }},
-                body: body,
-              });
-            }
-
-      - name: Fail if missing fixes found or scan error
-        if: steps.patchscan.outputs.fixes_found == 'true' || steps.patchscan.outputs.fixes_found == 'error'
-        run: |
-          if [ "${{ steps.patchscan.outputs.fixes_found }}" = "error" ]; then
-            echo "::error::Patchscan upstream verification error — see PR comment for details."
           else
-            echo "::warning::Missing upstream fixes detected — see PR comment for details."
+            echo "fixes_found=error" >> $GITHUB_OUTPUT
           fi
+
+      - name: Run validate-pr
+        id: validate
+        run: |
+          base_sha="${{ steps.pr.outputs.base_sha }}"
+          head_sha="${{ steps.pr.outputs.head_sha }}"
+          merge_base="$(git merge-base "$base_sha" "$head_sha")"
+          range="${merge_base}..${head_sha}"
+
+          pr_title="$(cat pr_title.txt)"
+          base_ref="${{ steps.pr.outputs.base_ref }}"
+
+          set +e
+          set -o pipefail
+          python3 .github/scripts/validate-pr \
+            "$range" \
+            origin \
+            linux \
+            --no-update \
+            --pr-title "$pr_title" \
+            --pr-body pr_body.txt \
+            --base-branch "$base_ref" \
+            2>&1 | tee validate_output.txt
+          exit_code=${PIPESTATUS[0]}
+          set +o pipefail
+          set -e
+
+          sed 's/\x1B\[[0-9;]*[A-Za-z]//g; s/\x1B\]8;;[^\x1B]*\x1B\\//g; s/\x1B\]8;;[^\a]*\a//g' \
+            validate_output.txt > validate_clean.txt
+
+          if grep -qE "^E:" validate_clean.txt || [ $exit_code -ne 0 ]; then
+            echo "result=error" >> $GITHUB_OUTPUT
+          elif grep -qE "^W:" validate_clean.txt; then
+            echo "result=warn" >> $GITHUB_OUTPUT
+          else
+            echo "result=pass" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Post unified PR Validation Report comment
+        if: always() && steps.pr.outputs.pr_repo == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const safeRead = (f) => fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '(no output captured)';
+            const truncateOutput = (raw) =>
+              raw.length > 30000 ? raw.slice(0, 30000) + '\n...(truncated)' : raw;
+            const escapeHtml = (s) =>
+              s
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+            const renderDetails = (raw) => {
+              const escaped = escapeHtml(truncateOutput(raw).trim());
+              return '<details><summary>Details</summary>\n\n<pre>' + escaped + '</pre>\n\n</details>';
+            };
+
+            // --- Patchscan section ---
+            const psResult = '${{ steps.patchscan.outputs.fixes_found }}' || 'error';
+            let psIcon, psHeading, psBody;
+            if (psResult === 'false') {
+              psIcon = ':white_check_mark:';
+              psHeading = 'No Missing Fixes';
+              psBody = 'All cherry-picked commits checked — no missing upstream fixes found.';
+            } else if (psResult === 'true') {
+              psIcon = ':warning:';
+              psHeading = 'Missing Fixes Detected';
+              const raw = safeRead('patchscan_clean.txt');
+              psBody = 'The following upstream fix commits appear to be missing:\n\n' + renderDetails(raw);
+            } else {
+              psIcon = ':x:';
+              psHeading = 'Upstream Verification Error';
+              const raw = safeRead('patchscan_clean.txt');
+              psBody = 'Could not verify one or more commits (often a false positive for SAUCE commits).\n\n' + renderDetails(raw);
+            }
+
+            // --- validate-pr section ---
+            const valResult = '${{ steps.validate.outputs.result }}' || 'error';
+            let valIcon, valHeading, valBody;
+            if (valResult === 'pass') {
+              valIcon = ':white_check_mark:';
+              valHeading = 'All checks passed';
+              const raw = safeRead('validate_clean.txt');
+              valBody = renderDetails(raw);
+            } else if (valResult === 'warn') {
+              valIcon = ':warning:';
+              valHeading = 'Warnings';
+              const raw = safeRead('validate_clean.txt');
+              valBody = renderDetails(raw);
+            } else {
+              valIcon = ':x:';
+              valHeading = 'Errors found';
+              const raw = safeRead('validate_clean.txt');
+              valBody = renderDetails(raw);
+            }
+
+            const body = [
+              '## PR Validation Report',
+              '',
+              `### Patchscan ${psIcon} ${psHeading}`,
+              psBody,
+              '',
+              `### PR Lint ${valIcon} ${valHeading}`,
+              valBody,
+            ].join('\n');
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ steps.pr.outputs.pr_number }},
+              per_page: 100,
+            });
+            const existing = comments.find(c =>
+              c.user.login === 'github-actions[bot]' &&
+              c.body.includes('PR Validation Report')
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: ${{ steps.pr.outputs.pr_number }},
+                body,
+              });
+            }
+
+      - name: Fail on errors
+        if: |
+          steps.patchscan.outputs.fixes_found == 'true' ||
+          steps.patchscan.outputs.fixes_found == 'error' ||
+          steps.validate.outputs.result == 'error'
+        run: |
+          ps="${{ steps.patchscan.outputs.fixes_found }}"
+          val="${{ steps.validate.outputs.result }}"
+          [ "$ps"  = "error" ] && echo "::error::Patchscan upstream verification error — see PR comment."
+          [ "$ps"  = "true"  ] && echo "::warning::Missing upstream fixes — see PR comment."
+          [ "$val" = "error" ] && echo "::error::PR lint errors — see PR comment."
           exit 1
