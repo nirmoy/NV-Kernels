@@ -186,10 +186,12 @@ def _extract_diff_text(text):
 
 
 def _diff_fingerprint(diff_text):
-    """SHA-1 over the content lines (+/-/@@) of a diff for comparison."""
+    """SHA-1 over added/removed content lines only (excludes @@ hunk headers
+    whose line numbers differ between email patches and git-show output)."""
     content = '\n'.join(
         l for l in diff_text.splitlines()
-        if l.startswith('+') or l.startswith('-') or l.startswith('@@ ')
+        if (l.startswith('+') or l.startswith('-'))
+        and not l.startswith('+++') and not l.startswith('---')
     )
     return hashlib.sha1(content.encode()).hexdigest()
 
