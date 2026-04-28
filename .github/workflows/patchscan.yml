@@ -2,6 +2,7 @@ name: PR Validation
 
 on:
   pull_request_target:
+    types: [opened, synchronize, reopened, edited]
     branches:
       - 24.04_linux-nvidia-6.17-next
       - 26.04_linux-nvidia-bos
