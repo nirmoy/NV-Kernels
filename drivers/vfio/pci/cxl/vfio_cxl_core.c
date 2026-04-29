@@ -712,6 +712,46 @@ static void vfio_cxl_enable_memory_space(struct vfio_pci_core_device *vdev)
 }
 
 /*
+ * vfio_cxl_reinit_hdm_shadow - reinitialise comp_reg_virt, preserving GPA bases.
+ *
+ * reinit_comp_regs() mirrors post-reset hardware state (all-zeros) into
+ * comp_reg_virt[], including the HDM decoder BASE registers. For decoders
+ * that the device manager committed with a guest-physical address before the
+ * reset, pci_dev_restore() will re-commit the hardware decoders with the
+ * host-physical base. The kernel provides no notification that BASE was
+ * cleared during reinit. Snapshot the GPA bases before reinit and restore
+ * them after so the emulated decoder remains consistent with what the device
+ * manager set.
+ *
+ * Called with memory_lock write side held (from vfio_cxl_finish_reset).
+ */
+static void vfio_cxl_reinit_hdm_shadow(struct vfio_pci_cxl_state *cxl)
+{
+	__le32 saved_lo[16] = {}, saved_hi[16] = {};
+	u8 n, count = min_t(u8, cxl->hdm_count, ARRAY_SIZE(saved_lo));
+
+	if (cxl->comp_reg_virt) {
+		for (n = 0; n < count; n++) {
+			saved_lo[n] = *hdm_reg_ptr(cxl,
+					CXL_HDM_DECODER0_BASE_LOW_OFFSET(n));
+			saved_hi[n] = *hdm_reg_ptr(cxl,
+					CXL_HDM_DECODER0_BASE_HIGH_OFFSET(n));
+		}
+	}
+
+	vfio_cxl_reinit_comp_regs(cxl);
+
+	if (cxl->comp_reg_virt) {
+		for (n = 0; n < count; n++) {
+			*hdm_reg_ptr(cxl,
+				CXL_HDM_DECODER0_BASE_LOW_OFFSET(n)) = saved_lo[n];
+			*hdm_reg_ptr(cxl,
+				CXL_HDM_DECODER0_BASE_HIGH_OFFSET(n)) = saved_hi[n];
+		}
+	}
+}
+
+/*
  * vfio_cxl_finish_reset - Re-enable DPA region after reset.
  *
  * Must be called with vdev->memory_lock held for writing.  Re-reads the
@@ -730,11 +770,10 @@ void vfio_cxl_finish_reset(struct vfio_pci_core_device *vdev)
 	vfio_cxl_enable_memory_space(vdev);
 
 	/*
-	 * Re-initialise the emulated HDM comp_reg_virt[] from hardware.
-	 * A reset clears decoder registers; mirror that in the emulated
-	 * state so the guest device manager sees the post-reset hardware.
+	 * Re-initialise the emulated HDM comp_reg_virt[] from hardware,
+	 * preserving the GPA decoder bases set by the device manager.
 	 */
-	vfio_cxl_reinit_comp_regs(cxl);
+	vfio_cxl_reinit_hdm_shadow(cxl);
 
 	/*
 	 * Only re-enable the DPA mmap if the hardware has actually
