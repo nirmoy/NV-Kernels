@@ -10,6 +10,7 @@
 
 #include <linux/pci.h>
 #include <linux/vfio_pci_core.h>
+#include <linux/unaligned.h>
 
 #include "../vfio_pci_priv.h"
 #include "vfio_cxl_priv.h"
@@ -126,12 +127,24 @@ static void cxl_dvsec_status2_write(struct vfio_pci_core_device *vdev,
 	u16 dvsec = _cxlds_get_dvsec(vdev->cxl);
 	u16 abs_off = dvsec + CXL_DVSEC_STATUS2_OFFSET;
 
-	/* RW1CS: write 1 to clear, but only if the capability is supported */
+	/*
+	 * VOLATILE_HDM_PRES_ERROR (bit 3) is RW1CS. Forward to hardware,
+	 * then mirror the clear into vconfig. Reads come from the shadow
+	 * now, so skipping the update leaves the bit stuck from the guest's
+	 * view.
+	 *
+	 * All other STATUS2 bits are RO hardware outputs; ignore guest writes.
+	 */
 	if ((cap3 & CXL_DVSEC_CAP3_VOLATILE_HDM_CONFIGURABILITY) &&
-	    (new_val & CXL_DVSEC_STATUS2_VOLATILE_HDM_PRES_ERROR))
+	    (new_val & CXL_DVSEC_STATUS2_VOLATILE_HDM_PRES_ERROR)) {
+		u16 v;
+
 		pci_write_config_word(vdev->pdev, abs_off,
 				      CXL_DVSEC_STATUS2_VOLATILE_HDM_PRES_ERROR);
-	/* STATUS2 is not mirrored in vconfig - reads go to hardware */
+		v = dvsec_virt_read16(vdev, CXL_DVSEC_STATUS2_OFFSET);
+		v &= ~CXL_DVSEC_STATUS2_VOLATILE_HDM_PRES_ERROR;
+		dvsec_virt_write16(vdev, CXL_DVSEC_STATUS2_OFFSET, v);
+	}
 }
 
 static void cxl_dvsec_lock_write(struct vfio_pci_core_device *vdev,
@@ -154,6 +167,30 @@ static void cxl_range_base_lo_write(struct vfio_pci_core_device *vdev,
 	dvsec_virt_write32(vdev, dvsec_off, new_val);
 }
 
+/*
+ * status2_hw_shadow_merge - read STATUS2, merging hardware and vconfig shadow.
+ *
+ * RESET_COMPLETE and RESET_ERROR are written into vconfig by vfio_cxl_reset()
+ * after a protocol reset; pci_dev_restore() clears them from hardware, so they
+ * must survive in the shadow for a polling guest to see the reset outcome.
+ *
+ * All other STATUS2 bits are live hardware outputs and must come from hardware.
+ * In particular, CACHE_INVALID (bit 0) is polled by guests during a standalone
+ * write-back invalidation.
+ *
+ * @abs_pos: absolute PCI config space byte offset of the STATUS2 register.
+ */
+static u16 status2_hw_shadow_merge(struct vfio_pci_core_device *vdev, int abs_pos)
+{
+	const u16 shadow_mask = CXL_DVSEC_STATUS2_CXL_RESET_COMPLETE |
+				CXL_DVSEC_STATUS2_CXL_RESET_ERROR;
+	u16 hw = 0, virt;
+
+	pci_read_config_word(vdev->pdev, abs_pos, &hw);
+	virt = get_unaligned_le16(vdev->vconfig + abs_pos);
+	return (hw & ~shadow_mask) | (virt & shadow_mask);
+}
+
 /**
  * vfio_cxl_dvsec_readfn - Per-device DVSEC read handler for CXL capable devices.
  * @vdev:   VFIO PCI core device
@@ -167,6 +204,10 @@ static void cxl_range_base_lo_write(struct vfio_pci_core_device *vdev,
  * vconfig values for virtualized DVSEC registers (CONTROL, STATUS, CONTROL2,
  * LOCK) so that userspace reads reflect emulated state rather than raw
  * hardware.  All other DVSEC bytes pass through to vfio_raw_config_read().
+ *
+ * A 4-byte (DWORD) access at the CONTROL2 offset spans both CONTROL2 and
+ * STATUS2 since CONTROL2 is DWORD-aligned and the two registers are adjacent.
+ * In that case STATUS2 is returned via the hardware-merge path.
  *
  * Return: @count on success, or negative error code from the fallback read.
  */
@@ -188,11 +229,32 @@ static int vfio_cxl_dvsec_readfn(struct vfio_pci_core_device *vdev,
 	switch (dvsec_off) {
 	case CXL_DVSEC_CONTROL_OFFSET:
 	case CXL_DVSEC_STATUS_OFFSET:
-	case CXL_DVSEC_CONTROL2_OFFSET:
 	case CXL_DVSEC_LOCK_OFFSET:
-		/* Return shadow vconfig value for virtualized registers */
+		/* Fully virtualised; return shadow. */
 		memcpy(val, vdev->vconfig + pos, count);
 		return count;
+	case CXL_DVSEC_CONTROL2_OFFSET:
+		if (count == 4) {
+			/*
+			 * A 4-byte access at the DWORD-aligned CONTROL2 offset
+			 * spans both CONTROL2 (low 16 bits) and STATUS2 (high 16
+			 * bits).  Return CONTROL2 from vconfig and STATUS2 via the
+			 * hardware-merge path so that CACHE_INVALID is fresh.
+			 */
+			__le32 combined = cpu_to_le32(
+				(u32)get_unaligned_le16(vdev->vconfig + pos) |
+				((u32)status2_hw_shadow_merge(vdev,
+					dvsec + CXL_DVSEC_STATUS2_OFFSET) << 16));
+			memcpy(val, &combined, 4);
+		} else {
+			memcpy(val, vdev->vconfig + pos, count);
+		}
+		return count;
+	case CXL_DVSEC_STATUS2_OFFSET: {
+		__le16 result = cpu_to_le16(status2_hw_shadow_merge(vdev, pos));
+		memcpy(val, &result, count);
+		return count;
+	}
 	default:
 		return vfio_raw_config_read(vdev, pos, count,
 					    perm, offset, val);
@@ -253,6 +315,15 @@ static int vfio_cxl_dvsec_writefn(struct vfio_pci_core_device *vdev,
 	case CXL_DVSEC_CONTROL2_OFFSET:
 		wval16 = (u16)le32_to_cpu(val);
 		cxl_dvsec_control2_write(vdev, wval16);
+		if (count == 4) {
+			/*
+			 * High half of a 32-bit write at CONTROL2 is STATUS2.
+			 * Forward to the STATUS2 handler so RW1CS bits (e.g.
+			 * VOLATILE_HDM_PRES_ERROR) are not silently dropped.
+			 */
+			wval16 = (u16)(le32_to_cpu(val) >> 16);
+			cxl_dvsec_status2_write(vdev, wval16);
+		}
 		break;
 	case CXL_DVSEC_STATUS2_OFFSET:
 		wval16 = (u16)le32_to_cpu(val);
