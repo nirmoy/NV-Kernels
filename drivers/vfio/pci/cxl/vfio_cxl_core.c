@@ -660,15 +660,20 @@ static int vfio_cxl_region_mmap(struct vfio_pci_core_device *vdev,
 	return 0;
 }
 
+bool vfio_cxl_reset_capable(struct vfio_pci_core_device *vdev)
+{
+	return vdev->cxl && pci_cxl_reset_capable(vdev->pdev);
+}
+
 /*
- * vfio_cxl_zap_region_locked - Invalidate all DPA region PTEs.
+ * vfio_cxl_prepare_reset - Invalidate all DPA region PTEs.
  *
  * Must be called with vdev->memory_lock held for writing.  Sets
  * region_active=false before zapping so any subsequent I/O to the region
  * sees the inactive state and returns an error rather than accessing
  * stale mappings.
  */
-void vfio_cxl_zap_region_locked(struct vfio_pci_core_device *vdev)
+void vfio_cxl_prepare_reset(struct vfio_pci_core_device *vdev)
 {
 	struct vfio_device *core_vdev = &vdev->vdev;
 	struct vfio_pci_cxl_state *cxl = vdev->cxl;
@@ -686,13 +691,13 @@ void vfio_cxl_zap_region_locked(struct vfio_pci_core_device *vdev)
 }
 
 /*
- * vfio_cxl_reactivate_region - Re-enable DPA region after successful reset.
+ * vfio_cxl_finish_reset - Re-enable DPA region after reset.
  *
  * Must be called with vdev->memory_lock held for writing.  Re-reads the
- * HDM decoder state from hardware (FLR cleared it) and sets region_active
- * so that subsequent I/O to the region is permitted again.
+ * HDM decoder state from hardware and sets region_active so that
+ * subsequent I/O to the region is permitted again.
  */
-void vfio_cxl_reactivate_region(struct vfio_pci_core_device *vdev)
+void vfio_cxl_finish_reset(struct vfio_pci_core_device *vdev)
 {
 	struct vfio_pci_cxl_state *cxl = vdev->cxl;
 
@@ -702,8 +707,8 @@ void vfio_cxl_reactivate_region(struct vfio_pci_core_device *vdev)
 		return;
 	/*
 	 * Re-initialise the emulated HDM comp_reg_virt[] from hardware.
-	 * After FLR the decoder registers read as zero; mirror that in
-	 * the emulated state so QEMU sees a clean slate.
+	 * A reset clears decoder registers; mirror that in the emulated
+	 * state so the guest device manager sees the post-reset hardware.
 	 */
 	vfio_cxl_reinit_comp_regs(cxl);
 
@@ -842,7 +847,7 @@ int vfio_cxl_register_cxl_region(struct vfio_pci_core_device *vdev)
 	 * Cache the vdev->region[] index before activating the region.
 	 * vfio_pci_core_register_dev_region() placed the new entry at
 	 * vdev->region[num_regions - 1] and incremented num_regions.
-	 * vfio_cxl_zap_region_locked() uses this to avoid scanning
+	 * vfio_cxl_prepare_reset() uses this to avoid scanning
 	 * vdev->region[] on every FLR.
 	 */
 	cxl->dpa_region_idx = vdev->num_regions - 1;
