@@ -80,15 +80,12 @@ jobs:
       - name: Write PR title and body to files
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_REPO: ${{ steps.pr.outputs.pr_repo }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            pr_json=$(gh api repos/${{ steps.pr.outputs.pr_repo }}/pulls/${{ steps.pr.outputs.pr_number }})
-            echo "$pr_json" | jq -r '.title' > pr_title.txt
-            echo "$pr_json" | jq -r '.body // ""' > pr_body.txt
-          else
-            printf '%s' "${{ github.event.pull_request.title }}" > pr_title.txt
-            printf '%s' "${{ github.event.pull_request.body }}" > pr_body.txt
-          fi
+          pr_json=$(gh api "repos/${PR_REPO}/pulls/${PR_NUMBER}")
+          printf '%s\n' "$pr_json" | jq -r '.title // ""' > pr_title.txt
+          printf '%s\n' "$pr_json" | jq -r '.body // ""' > pr_body.txt
 
       - name: Fetch scripts from github-actions branch
         run: |
