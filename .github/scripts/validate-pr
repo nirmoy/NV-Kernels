@@ -149,7 +149,7 @@ def describe_sob_chain_backport(message):
     return "ok, backporter: {}".format(' '.join(names))
 
 
-COL_WIDTHS = [12, 45, 10, 7, 25]
+COL_WIDTHS = [12, 64, 10, 7, 25]
 HEADERS    = ['Local', 'Referenced upstream / Patch subject', 'Patch-ID', 'Subject', 'SoB chain']
 
 def _hline(left, sep, right):
@@ -177,6 +177,11 @@ def print_digest_table(rows):
         else:
             print(Fore.GREEN + line + Fore.RESET)
     print(_hline('└', '┴', '┘'))
+
+
+def format_upstream_ref(sha12, subject):
+    """Return compact digest text for a referenced upstream commit."""
+    return "{} {}".format(sha12, subject)
 
 
 def _shorten_lkml_url(url):
@@ -434,6 +439,7 @@ def build_digest(commits, repo, upstream_remote=None):
         # Subject
         local_subj    = subject_of(commit)
         upstream_subj = subject_of(upstream)
+        upstream_ref  = format_upstream_ref(upstream_sha12, upstream_subj)
         if local_subj == upstream_subj:
             subj_status = 'match'
             subj_error  = False
@@ -450,7 +456,7 @@ def build_digest(commits, repo, upstream_remote=None):
                 local_sha12, subject_of(commit)[:40], sob_status))
 
         has_error = pid_error or subj_error or sob_error
-        rows.append(dict(local=local_sha12, upstream=upstream_sha12,
+        rows.append(dict(local=local_sha12, upstream=upstream_ref,
                          patch_id=pid_status, subject=subj_status,
                          sob=sob_status, error=has_error))
 
