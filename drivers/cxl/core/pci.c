@@ -147,16 +147,24 @@ static int cxl_dvsec_mem_range_active(struct cxl_dev_state *cxlds, int id)
 	return 0;
 }
 
-/*
- * Wait up to @media_ready_timeout for the device to report memory
- * active.
+/**
+ * cxl_await_range_active - Wait for all HDM DVSEC memory ranges to be active
+ * @cxlds: CXL device state (DVSEC and HDM count must be valid)
+ *
+ * For each HDM decoder range reported in the CXL DVSEC capability, waits for
+ * the range to report MEM INFO VALID (up to 1s per range), then MEM ACTIVE
+ * (up to media_ready_timeout seconds per range, default 60s). Used by
+ * cxl_await_media_ready() and by callers that only need range readiness
+ * without checking the memory device status register.
+ *
+ * Return: 0 if all ranges become valid and active, -ETIMEDOUT if a timeout
+ * occurs, or a negative errno from config read on failure.
  */
-int cxl_await_media_ready(struct cxl_dev_state *cxlds)
+int cxl_await_range_active(struct cxl_dev_state *cxlds)
 {
 	struct pci_dev *pdev = to_pci_dev(cxlds->dev);
 	int d = cxlds->cxl_dvsec;
 	int rc, i, hdm_count;
-	u64 md_status;
 	u16 cap;
 
 	rc = pci_read_config_word(pdev,
@@ -176,6 +184,23 @@ int cxl_await_media_ready(struct cxl_dev_state *cxlds)
 		if (rc)
 			return rc;
 	}
+
+	return 0;
+}
+EXPORT_SYMBOL_NS_GPL(cxl_await_range_active, "CXL");
+
+/*
+ * Wait up to @media_ready_timeout for the device to report memory
+ * active.
+ */
+int cxl_await_media_ready(struct cxl_dev_state *cxlds)
+{
+	u64 md_status;
+	int rc;
+
+	rc = cxl_await_range_active(cxlds);
+	if (rc)
+		return rc;
 
 	md_status = readq(cxlds->regs.memdev + CXLMDEV_STATUS_OFFSET);
 	if (!CXLMDEV_READY(md_status))
@@ -453,6 +478,35 @@ int cxl_hdm_decode_init(struct cxl_dev_state *cxlds, struct cxl_hdm *cxlhdm,
 	return 0;
 }
 EXPORT_SYMBOL_NS_GPL(cxl_hdm_decode_init, "CXL");
+
+/**
+ * cxl_get_hdm_info - Get HDM decoder register block location and count
+ * @cxlds: CXL device state (must have component regs enumerated via
+ *	   cxl_probe_component_regs())
+ * @count:  number of HDM decoders in the block (from HDM Capability bits [3:0])
+ * @offset: byte offset of HDM decoder block within the component register BAR
+ * @size:   size in bytes of the HDM decoder block
+ *
+ * Return: 0 on success. -ENODEV if the HDM decoder block is not present.
+ */
+int cxl_get_hdm_info(struct cxl_dev_state *cxlds, u8 *count,
+		     resource_size_t *offset, resource_size_t *size)
+{
+	struct cxl_reg_map *hdm = &cxlds->reg_map.component_map.hdm_decoder;
+
+	if (WARN_ON(!count || !offset || !size))
+		return -EINVAL;
+
+	if (!hdm->valid)
+		return -ENODEV;
+
+	*count	= hdm->count;
+	*offset = hdm->offset;
+	*size	= hdm->size;
+
+	return 0;
+}
+EXPORT_SYMBOL_NS_GPL(cxl_get_hdm_info, "CXL");
 
 #define CXL_DOE_TABLE_ACCESS_REQ_CODE		0x000000ff
 #define   CXL_DOE_TABLE_ACCESS_REQ_CODE_READ	0
@@ -1183,7 +1237,7 @@ static void cxl_pci_functions_reset_done(struct cxl_reset_context *ctx)
 /*
  * CXL device reset execution
  */
-static int cxl_dev_reset(struct pci_dev *pdev, int dvsec)
+int cxl_dev_reset(struct pci_dev *pdev, int dvsec, bool mem_clr_en)
 {
 	static const u32 reset_timeout_ms[] = { 10, 100, 1000, 10000, 100000 };
 	u16 cap, ctrl2, status2;
@@ -1253,7 +1307,17 @@ static int cxl_dev_reset(struct pci_dev *pdev, int dvsec)
 		if (rc)
 			return rc;
 
-		ctrl2 |= PCI_DVSEC_CXL_RST_MEM_CLR_EN;
+		/*
+		 * Explicitly set or clear RST_MEM_CLR_EN rather than only
+		 * setting it.  A previous reset may have left the bit set in
+		 * hardware; if mem_clr_en is false we must clear it so that a
+		 * stale bit does not cause an unwanted memory-clearing reset.
+		 */
+		if (mem_clr_en)
+			ctrl2 |= PCI_DVSEC_CXL_RST_MEM_CLR_EN;
+		else
+			ctrl2 &= ~PCI_DVSEC_CXL_RST_MEM_CLR_EN;
+
 		rc = pci_write_config_word(pdev, dvsec + PCI_DVSEC_CXL_CTRL2,
 					   ctrl2);
 		if (rc)
@@ -1302,6 +1366,7 @@ static int cxl_dev_reset(struct pci_dev *pdev, int dvsec)
 
 	return 0;
 }
+EXPORT_SYMBOL_NS_GPL(cxl_dev_reset, "CXL");
 
 static int match_memdev_by_parent(struct device *dev, const void *parent)
 {
@@ -1341,7 +1406,7 @@ static int cxl_do_reset(struct pci_dev *pdev)
 	pci_dev_save_and_disable(pdev);
 	cxl_pci_functions_reset_prepare(&ctx);
 
-	rc = cxl_dev_reset(pdev, dvsec);
+	rc = cxl_dev_reset(pdev, dvsec, true);
 
 	cxl_pci_functions_reset_done(&ctx);
 
@@ -1370,7 +1435,7 @@ out_unlock:
  * devices under bus core serialization.
  */
 
-static bool pci_cxl_reset_capable(struct pci_dev *pdev)
+bool pci_cxl_reset_capable(struct pci_dev *pdev)
 {
 	int dvsec;
 	u16 cap;
@@ -1389,6 +1454,7 @@ static bool pci_cxl_reset_capable(struct pci_dev *pdev)
 
 	return !!(cap & PCI_DVSEC_CXL_RST_CAPABLE);
 }
+EXPORT_SYMBOL_NS_GPL(pci_cxl_reset_capable, "CXL");
 
 static ssize_t cxl_reset_store(struct device *dev,
 			       struct device_attribute *attr,
