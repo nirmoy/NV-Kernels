@@ -33,12 +33,32 @@ def get_cherry_pick_sha(message):
     m = re.search(r'\(cherry picked from commit ([a-fA-F0-9]+)\)', message)
     return m.group(1) if m else None
 
+def get_backported_commit_sha(message):
+    m = re.search(r'\(backported from commit ([a-fA-F0-9]+)\)', message)
+    return m.group(1) if m else None
+
+def get_upstream_commit_sha(message):
+    for getter in (get_cherry_pick_sha, get_backported_commit_sha):
+        sha = getter(message)
+        if sha:
+            return sha
+    m = re.search(r'^[Uu]pstream commit ([a-fA-F0-9]+)', message, re.MULTILINE)
+    return m.group(1) if m else None
+
 def get_backport_url(message):
     m = re.search(r'\(backported from (https?://[^\)]+)\)', message)
     return m.group(1) if m else None
 
 def is_sauce(subject):
     return bool(re.match(r'^NVIDIA:.*SAUCE:', subject))
+
+def is_ubuntu_local(subject):
+    """Ubuntu-local commits with no upstream equivalent.
+
+    Catches 'UBUNTU: SAUCE: ...', 'UBUNTU: [Config] ...',
+    'UBUNTU: [Packaging] ...', 'UBUNTU: Ubuntu-X.X.X-...', etc.
+    """
+    return bool(re.match(r'^UBUNTU:\s', subject))
 
 def is_revert(subject):
     return subject.startswith('Revert "')
@@ -129,7 +149,7 @@ def describe_sob_chain_backport(message):
     return "ok, backporter: {}".format(' '.join(names))
 
 
-COL_WIDTHS = [12, 45, 10, 7, 25]
+COL_WIDTHS = [12, 64, 10, 7, 25]
 HEADERS    = ['Local', 'Referenced upstream / Patch subject', 'Patch-ID', 'Subject', 'SoB chain']
 
 def _hline(left, sep, right):
@@ -157,6 +177,11 @@ def print_digest_table(rows):
         else:
             print(Fore.GREEN + line + Fore.RESET)
     print(_hline('└', '┴', '┘'))
+
+
+def format_upstream_ref(sha12, subject):
+    """Return compact digest text for a referenced upstream commit."""
+    return "{} {}".format(sha12, subject)
 
 
 def _shorten_lkml_url(url):
@@ -322,7 +347,7 @@ def build_digest(commits, repo, upstream_remote=None):
     errors = []
 
     for commit in commits:
-        src_sha = get_cherry_pick_sha(commit.message)
+        src_sha = get_upstream_commit_sha(commit.message)
         bp_url  = get_backport_url(commit.message)
 
         # --- SAUCE / Revert: no upstream reference, show as informational row ---
@@ -336,6 +361,9 @@ def build_digest(commits, repo, upstream_remote=None):
                 # Strip outer Revert "..." wrapper and SAUCE prefix for display
                 inner = re.sub(r'^Revert\s+"', '', subj).rstrip('"')
                 display = _norm_sauce_subject(inner) or inner
+            elif is_ubuntu_local(subj):
+                kind    = 'UBUNTU'
+                display = re.sub(r'^UBUNTU:\s*', '', subj)
             else:
                 kind    = 'SAUCE'
                 display = _norm_sauce_subject(subj) or subj
@@ -411,6 +439,7 @@ def build_digest(commits, repo, upstream_remote=None):
         # Subject
         local_subj    = subject_of(commit)
         upstream_subj = subject_of(upstream)
+        upstream_ref  = format_upstream_ref(upstream_sha12, upstream_subj)
         if local_subj == upstream_subj:
             subj_status = 'match'
             subj_error  = False
@@ -427,7 +456,7 @@ def build_digest(commits, repo, upstream_remote=None):
                 local_sha12, subject_of(commit)[:40], sob_status))
 
         has_error = pid_error or subj_error or sob_error
-        rows.append(dict(local=local_sha12, upstream=upstream_sha12,
+        rows.append(dict(local=local_sha12, upstream=upstream_ref,
                          patch_id=pid_status, subject=subj_status,
                          sob=sob_status, error=has_error))
 
@@ -460,20 +489,25 @@ def lint_commits(commits):
 
         # Classification for R6/R7/R9/R10
         sauce   = is_sauce(subject)
+        ubuntu  = is_ubuntu_local(subject)
         revert  = is_revert(subject)
 
-        # R9: subject length — exempt SAUCE and Reverts of SAUCE; the mandatory
-        # "NVIDIA: [VR: ]SAUCE:" prefix already consumes 15–20 characters.
+        # R9: subject length — exempt SAUCE, UBUNTU local and Reverts of SAUCE;
+        # the mandatory "NVIDIA: [VR: ]SAUCE:" / "UBUNTU: [Config]" prefix
+        # already consumes 12–20 characters.
         revert_of_sauce = revert and bool(re.match(r'^Revert "NVIDIA:.*SAUCE:', subject))
-        if len(subject) > 72 and not sauce and not revert_of_sauce:
+        if len(subject) > 72 and not sauce and not ubuntu and not revert_of_sauce:
             warnings.append("W: {}: subject {} chars (>72)".format(label, len(subject)))
-        cp_sha  = get_cherry_pick_sha(commit.message)
+        upstream_sha = get_upstream_commit_sha(commit.message)
+        cp_sha       = get_cherry_pick_sha(commit.message)
         bp_url  = get_backport_url(commit.message)
 
-        # R6: non-SAUCE, non-Revert commits must have an upstream reference trailer
-        if not sauce and not revert and cp_sha is None and bp_url is None:
+        # R6: non-SAUCE, non-UBUNTU, non-Revert commits must have an upstream
+        # reference trailer.  UBUNTU local commits (e.g. UBUNTU: [Config]) have
+        # no upstream equivalent.
+        if not sauce and not ubuntu and not revert and upstream_sha is None and bp_url is None:
             errors.append(
-                "E: {}: not SAUCE/Revert but has no upstream reference trailer"
+                "E: {}: not SAUCE/UBUNTU/Revert but has no upstream reference trailer"
                 " (cherry picked from commit ... or backported from ...)".format(label))
 
         # R7: detect wrong trailer for LKML in-review backports
@@ -508,19 +542,18 @@ def check_pr_metadata(pr_title, pr_body_path, base_branch):
             warnings.append(
                 "W: PR title missing [<branch>] prefix: \"{}\"".format(pr_title[:80]))
 
-    # R3: BugLink required for tracked branches
+    # R3: Launchpad bug link required for tracked branches
     if pr_body_path and base_branch and TRACKED_BRANCH_RE.match(base_branch):
         try:
             body = open(pr_body_path).read()
         except OSError as e:
             errors.append("E: cannot read --pr-body {}: {}".format(pr_body_path, e))
             body = ''
-        buglink_re = re.compile(
-            r'^(?:BugLink:|LP:)\s+https://bugs\.launchpad\.net/', re.MULTILINE)
+        buglink_re = re.compile(r'https://bugs\.launchpad\.net/')
         if not buglink_re.search(body):
             errors.append(
-                "E: PR targets {} but body has no 'BugLink:' or 'LP:'"
-                " https://bugs.launchpad.net/... line".format(base_branch))
+                "E: PR targets {} but body has no"
+                " https://bugs.launchpad.net/... link".format(base_branch))
 
     return warnings, errors
 
