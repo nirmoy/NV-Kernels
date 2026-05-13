@@ -146,9 +146,11 @@ def describe_sob_chain_backport(message):
         return 'MISSING: backporter SOB after (backported from)'
     first_backporter_sob_pos = min(pos for pos, _ in sobs if pos > bp_pos)
     if any(pos < bp_pos for pos, _ in notes):
-        return 'ORDER: note before (backported from)'
+        return ('ORDER: move [Name: note] after (backported from ...) and'
+                ' before the backporter Signed-off-by')
     if any(pos > first_backporter_sob_pos for pos, _ in notes):
-        return 'ORDER: note after backporter SOB'
+        return ('ORDER: move [Name: note] before the backporter Signed-off-by'
+                ' and after (backported from ...)')
     names = []
     for s in after:
         m = re.match(r'Signed-off-by:\s+\S.*<([^@>]+)', s)
