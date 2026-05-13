@@ -127,13 +127,15 @@ def describe_sob_chain_backport(message):
     """Check SOB ordering for a (backported from <url>) commit.
 
     Correct order: original-author SOB(s), then (backported from ...), then
-    backporter SOB.  Returns a short status string; strings starting with
-    'MISSING' indicate an error.
+    optional [Name: note], then backporter SOB.  Returns a short status
+    string; strings starting with 'MISSING' or 'ORDER' indicate an error.
     """
     bp_match = re.search(r'\(backported from https?://[^\)]+\)', message)
     if bp_match is None:
         return 'no backport tag'
     bp_pos = bp_match.start()
+    notes = [(m.start(), m.group()) for m in
+             re.finditer(r'^\[[\w][\w .\-]+:.*\]', message, re.MULTILINE)]
     sobs = [(m.start(), m.group()) for m in
             re.finditer(r'^Signed-off-by:.*$', message, re.MULTILINE)]
     before = [s for pos, s in sobs if pos < bp_pos]
@@ -142,6 +144,13 @@ def describe_sob_chain_backport(message):
         return 'MISSING: no SOB before (backported from)'
     if not after:
         return 'MISSING: backporter SOB after (backported from)'
+    first_backporter_sob_pos = min(pos for pos, _ in sobs if pos > bp_pos)
+    if any(pos < bp_pos for pos, _ in notes):
+        return ('ORDER: move [Name: note] after (backported from ...) and'
+                ' before the backporter Signed-off-by')
+    if any(pos > first_backporter_sob_pos for pos, _ in notes):
+        return ('ORDER: move [Name: note] before the backporter Signed-off-by'
+                ' and after (backported from ...)')
     names = []
     for s in after:
         m = re.match(r'Signed-off-by:\s+\S.*<([^@>]+)', s)
@@ -382,9 +391,9 @@ def build_digest(commits, repo, upstream_remote=None):
         if src_sha is None:
             local_sha12 = commit.hexsha[:12]
             sob_status  = describe_sob_chain_backport(commit.message)
-            sob_error   = sob_status.startswith('MISSING')
+            sob_error   = sob_status.startswith(('MISSING', 'ORDER'))
             if sob_error:
-                errors.append("E: {} (\"{}\"): SOB chain: {}".format(
+                errors.append("E: {} (\"{}\"): backport trailer order: {}".format(
                     local_sha12, subject_of(commit)[:40], sob_status))
             diff_status, diff_error, subj_status = check_backport_diff(commit)
             if diff_error:
