@@ -197,8 +197,17 @@ jobs:
           script: |
             const fs = require('fs');
             const safeRead = (f) => fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '(no output captured)';
-            const truncateOutput = (raw) =>
-              raw.length > 30000 ? raw.slice(0, 30000) + '\n...(truncated)' : raw;
+            const truncateOutput = (raw) => {
+              const max = 30000;
+              const marker = '\n... (middle truncated; see Actions log for full output) ...\n';
+              if (raw.length <= max) {
+                return raw;
+              }
+              const remaining = max - marker.length;
+              const head = Math.floor(remaining * 0.6);
+              const tail = remaining - head;
+              return raw.slice(0, head) + marker + raw.slice(raw.length - tail);
+            };
             const escapeHtml = (s) =>
               s
                 .replace(/&/g, '&amp;')
