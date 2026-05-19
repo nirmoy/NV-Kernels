@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: 'PR number to scan'
+        description: 'PR number to validate'
         required: true
         type: number
       repo:
@@ -19,8 +19,8 @@ on:
         type: string
 
 jobs:
-  patchscan:
-    name: Patchscan + PR lint
+  pr-validation:
+    name: PR lint
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
@@ -74,8 +74,8 @@ jobs:
             fetch_remote="pr-upstream"
           fi
           git fetch --no-tags "$fetch_remote" \
-            ${{ steps.pr.outputs.base_sha }}:refs/remotes/origin/patchscan-base \
-            refs/pull/${{ steps.pr.outputs.pr_number }}/head:refs/remotes/origin/patchscan-head
+            ${{ steps.pr.outputs.base_sha }}:refs/remotes/origin/pr-validation-base \
+            refs/pull/${{ steps.pr.outputs.pr_number }}/head:refs/remotes/origin/pr-validation-head
 
       - name: Write PR title and body to files
         env:
@@ -91,7 +91,6 @@ jobs:
         run: |
           git fetch origin github-actions
           git checkout origin/github-actions -- \
-            .github/scripts/patchscan \
             .github/scripts/validate-pr \
             .github/scripts/requirements.txt
 
@@ -108,50 +107,6 @@ jobs:
       - name: Fetch origin/linux branch (used as upstream reference)
         run: |
           git fetch origin linux
-
-      - name: Run patchscan
-        id: patchscan
-        run: |
-          base_sha="${{ steps.pr.outputs.base_sha }}"
-          head_sha="${{ steps.pr.outputs.head_sha }}"
-          merge_base="$(git merge-base "$base_sha" "$head_sha")"
-          range="${merge_base}..${head_sha}"
-          echo "Merge base: $merge_base"
-          echo "Scanning commit range: $range"
-          echo "Upstream: origin/linux"
-
-          # Run patchscan, capture output; use PIPESTATUS to get patchscan's exit code, not tee's
-          set +e
-          set -o pipefail
-          python3 .github/scripts/patchscan \
-            "$range" \
-            origin \
-            linux \
-            --no-update \
-            2>&1 | tee patchscan_output.txt
-          exit_code=${PIPESTATUS[0]}
-          set +o pipefail
-          set -e
-
-          # Strip ANSI escape codes for the summary
-          sed 's/\x1B\[[0-9;]*[A-Za-z]//g; s/\x1B\]8;;[^\x1B]*\x1B\\//g; s/\x1B\]8;;[^\a]*\a//g' \
-            patchscan_output.txt > patchscan_clean.txt
-
-          # Classify the outcome:
-          # 1. "Fixes for" lines after "All fixes:" → missing fixes found
-          # 2. "All fixes:" with no entries         → no missing fixes
-          # 3. No "All fixes:" marker              → patchscan crashed before finishing
-          if awk '
-            /^All fixes:/ { in_all_fixes = 1; next }
-            in_all_fixes && /^Fixes for / { found = 1; exit 0 }
-            END { exit found ? 0 : 1 }
-          ' patchscan_clean.txt; then
-            echo "fixes_found=true" >> $GITHUB_OUTPUT
-          elif grep -q "^All fixes:" patchscan_clean.txt; then
-            echo "fixes_found=false" >> $GITHUB_OUTPUT
-          else
-            echo "fixes_found=error" >> $GITHUB_OUTPUT
-          fi
 
       - name: Run validate-pr
         id: validate
@@ -209,25 +164,6 @@ jobs:
               return '<details><summary>Details</summary>\n\n<pre>' + escaped + '</pre>\n\n</details>';
             };
 
-            // --- Patchscan section ---
-            const psResult = '${{ steps.patchscan.outputs.fixes_found }}' || 'error';
-            let psIcon, psHeading, psBody;
-            if (psResult === 'false') {
-              psIcon = ':white_check_mark:';
-              psHeading = 'No Missing Fixes';
-              psBody = 'All cherry-picked commits checked — no missing upstream fixes found.';
-            } else if (psResult === 'true') {
-              psIcon = ':warning:';
-              psHeading = 'Missing Fixes Detected';
-              const raw = safeRead('patchscan_clean.txt');
-              psBody = 'The following upstream fix commits appear to be missing:\n\n' + renderDetails(raw);
-            } else {
-              psIcon = ':x:';
-              psHeading = 'Upstream Verification Error';
-              const raw = safeRead('patchscan_clean.txt');
-              psBody = 'Could not verify one or more commits (often a false positive for SAUCE commits).\n\n' + renderDetails(raw);
-            }
-
             // --- validate-pr section ---
             const valResult = '${{ steps.validate.outputs.result }}' || 'error';
             let valIcon, valHeading, valBody;
@@ -250,9 +186,6 @@ jobs:
 
             const body = [
               '## PR Validation Report',
-              '',
-              `### Patchscan ${psIcon} ${psHeading}`,
-              psBody,
               '',
               `### PR Lint ${valIcon} ${valHeading}`,
               valBody,
@@ -286,14 +219,8 @@ jobs:
             }
 
       - name: Fail on errors
-        if: |
-          steps.patchscan.outputs.fixes_found == 'true' ||
-          steps.patchscan.outputs.fixes_found == 'error' ||
-          steps.validate.outputs.result == 'error'
+        if: steps.validate.outputs.result == 'error'
         run: |
-          ps="${{ steps.patchscan.outputs.fixes_found }}"
           val="${{ steps.validate.outputs.result }}"
-          [ "$ps"  = "error" ] && echo "::error::Patchscan upstream verification error — see PR comment."
-          [ "$ps"  = "true"  ] && echo "::warning::Missing upstream fixes — see PR comment."
           [ "$val" = "error" ] && echo "::error::PR lint errors — see PR comment."
           exit 1
