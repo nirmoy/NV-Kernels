@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: 'PR number to validate'
+        description: 'PR number to scan'
         required: true
         type: number
       repo:
@@ -19,8 +19,8 @@ on:
         type: string
 
 jobs:
-  pr-validation:
-    name: PR lint
+  patchscan:
+    name: Patchscan + PR lint
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
@@ -31,51 +31,136 @@ jobs:
         id: pr_info
         env:
           GH_TOKEN: ${{ github.token }}
+          DEFAULT_REPO: ${{ github.repository }}
+          INPUT_REPO: ${{ inputs.repo }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
         run: |
-          pr_repo="${{ inputs.repo || github.repository }}"
-          pr_json=$(gh api repos/${pr_repo}/pulls/${{ inputs.pr_number }})
-          echo "head_sha=$(echo "$pr_json" | jq -r .head.sha)" >> $GITHUB_OUTPUT
-          echo "base_sha=$(echo "$pr_json" | jq -r .base.sha)" >> $GITHUB_OUTPUT
-          echo "base_ref=$(echo "$pr_json" | jq -r .base.ref)" >> $GITHUB_OUTPUT
-          echo "pr_number=${{ inputs.pr_number }}" >> $GITHUB_OUTPUT
-          echo "pr_repo=${pr_repo}" >> $GITHUB_OUTPUT
+          pr_repo="${INPUT_REPO:-$DEFAULT_REPO}"
+          if [[ ! "$pr_repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::Invalid repo input"
+            exit 1
+          fi
+          if [[ ! "$INPUT_PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid PR number input"
+            exit 1
+          fi
+
+          pr_json=$(gh api "repos/${pr_repo}/pulls/${INPUT_PR_NUMBER}")
+          head_sha="$(echo "$pr_json" | jq -r .head.sha)"
+          base_sha="$(echo "$pr_json" | jq -r .base.sha)"
+          base_ref="$(echo "$pr_json" | jq -r .base.ref)"
+
+          if [[ ! "$head_sha" =~ ^[0-9a-fA-F]{40}$ ]] ||
+             [[ ! "$base_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Invalid PR SHA metadata"
+            exit 1
+          fi
+          if [[ ! "$base_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] ||
+             [[ "$base_ref" == *..* ]] ||
+             [[ "$base_ref" == */ ]] ||
+             [[ "$base_ref" == *.lock ]]; then
+            echo "::error::Invalid base ref metadata"
+            exit 1
+          fi
+
+          printf 'head_sha=%s\n' "$head_sha" >> "$GITHUB_OUTPUT"
+          printf 'base_sha=%s\n' "$base_sha" >> "$GITHUB_OUTPUT"
+          printf 'base_ref=%s\n' "$base_ref" >> "$GITHUB_OUTPUT"
+          printf 'pr_number=%s\n' "$INPUT_PR_NUMBER" >> "$GITHUB_OUTPUT"
+          printf 'pr_repo=%s\n' "$pr_repo" >> "$GITHUB_OUTPUT"
 
       - name: Set PR variables
         id: pr
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_HEAD_SHA: ${{ steps.pr_info.outputs.head_sha }}
+          DISPATCH_BASE_SHA: ${{ steps.pr_info.outputs.base_sha }}
+          DISPATCH_BASE_REF: ${{ steps.pr_info.outputs.base_ref }}
+          DISPATCH_PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
+          DISPATCH_PR_REPO: ${{ steps.pr_info.outputs.pr_repo }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DEFAULT_REPO: ${{ github.repository }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "head_sha=${{ steps.pr_info.outputs.head_sha }}" >> $GITHUB_OUTPUT
-            echo "base_sha=${{ steps.pr_info.outputs.base_sha }}" >> $GITHUB_OUTPUT
-            echo "base_ref=${{ steps.pr_info.outputs.base_ref }}" >> $GITHUB_OUTPUT
-            echo "pr_number=${{ steps.pr_info.outputs.pr_number }}" >> $GITHUB_OUTPUT
-            echo "pr_repo=${{ steps.pr_info.outputs.pr_repo }}" >> $GITHUB_OUTPUT
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            head_sha="$DISPATCH_HEAD_SHA"
+            base_sha="$DISPATCH_BASE_SHA"
+            base_ref="$DISPATCH_BASE_REF"
+            pr_number="$DISPATCH_PR_NUMBER"
+            pr_repo="$DISPATCH_PR_REPO"
           else
-            echo "head_sha=${{ github.event.pull_request.head.sha }}" >> $GITHUB_OUTPUT
-            echo "base_sha=${{ github.event.pull_request.base.sha }}" >> $GITHUB_OUTPUT
-            echo "base_ref=${{ github.base_ref }}" >> $GITHUB_OUTPUT
-            echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
-            echo "pr_repo=${{ github.repository }}" >> $GITHUB_OUTPUT
+            head_sha="$PR_HEAD_SHA"
+            base_sha="$PR_BASE_SHA"
+            base_ref="$PR_BASE_REF"
+            pr_number="$PR_NUMBER"
+            pr_repo="$DEFAULT_REPO"
           fi
 
+          if [[ ! "$head_sha" =~ ^[0-9a-fA-F]{40}$ ]] ||
+             [[ ! "$base_sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Invalid PR SHA metadata"
+            exit 1
+          fi
+          if [[ ! "$base_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] ||
+             [[ "$base_ref" == *..* ]] ||
+             [[ "$base_ref" == */ ]] ||
+             [[ "$base_ref" == *.lock ]]; then
+            echo "::error::Invalid base ref metadata"
+            exit 1
+          fi
+          if [[ ! "$pr_number" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid PR number metadata"
+            exit 1
+          fi
+          if [[ ! "$pr_repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::Invalid repo metadata"
+            exit 1
+          fi
+
+          printf 'head_sha=%s\n' "$head_sha" >> "$GITHUB_OUTPUT"
+          printf 'base_sha=%s\n' "$base_sha" >> "$GITHUB_OUTPUT"
+          printf 'base_ref=%s\n' "$base_ref" >> "$GITHUB_OUTPUT"
+          printf 'pr_number=%s\n' "$pr_number" >> "$GITHUB_OUTPUT"
+          printf 'pr_repo=%s\n' "$pr_repo" >> "$GITHUB_OUTPUT"
+
       - name: Checkout base branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ steps.pr.outputs.base_ref }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Fetch PR commits
+        env:
+          BASE_REPO: ${{ github.repository }}
+          PR_REPO: ${{ steps.pr.outputs.pr_repo }}
+          BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
         run: |
-          pr_repo="${{ steps.pr.outputs.pr_repo }}"
-          if [ "$pr_repo" = "${{ github.repository }}" ]; then
+          if [[ ! "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::Invalid repo metadata"
+            exit 1
+          fi
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Invalid base SHA metadata"
+            exit 1
+          fi
+          if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid PR number metadata"
+            exit 1
+          fi
+
+          if [ "$PR_REPO" = "$BASE_REPO" ]; then
             fetch_remote="origin"
           else
-            git remote add pr-upstream "https://github.com/${pr_repo}.git"
+            git remote add pr-upstream "https://github.com/${PR_REPO}.git"
             fetch_remote="pr-upstream"
           fi
           git fetch --no-tags "$fetch_remote" \
-            ${{ steps.pr.outputs.base_sha }}:refs/remotes/origin/pr-validation-base \
-            refs/pull/${{ steps.pr.outputs.pr_number }}/head:refs/remotes/origin/pr-validation-head
+            "${BASE_SHA}:refs/remotes/origin/patchscan-base" \
+            "refs/pull/${PR_NUMBER}/head:refs/remotes/origin/patchscan-head"
 
       - name: Write PR title and body to files
         env:
@@ -83,6 +168,15 @@ jobs:
           PR_REPO: ${{ steps.pr.outputs.pr_repo }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
         run: |
+          if [[ ! "$PR_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::Invalid repo metadata"
+            exit 1
+          fi
+          if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid PR number metadata"
+            exit 1
+          fi
+
           pr_json=$(gh api "repos/${PR_REPO}/pulls/${PR_NUMBER}")
           printf '%s\n' "$pr_json" | jq -r '.title // ""' > pr_title.txt
           printf '%s\n' "$pr_json" | jq -r '.body // ""' > pr_body.txt
@@ -91,11 +185,12 @@ jobs:
         run: |
           git fetch origin github-actions
           git checkout origin/github-actions -- \
+            .github/scripts/patchscan \
             .github/scripts/validate-pr \
             .github/scripts/requirements.txt
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: 'pip'
@@ -108,16 +203,80 @@ jobs:
         run: |
           git fetch origin linux
 
+      - name: Run patchscan
+        id: patchscan
+        env:
+          BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] ||
+             [[ ! "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Invalid PR SHA metadata"
+            exit 1
+          fi
+
+          merge_base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          range="${merge_base}..${HEAD_SHA}"
+          echo "Merge base: $merge_base"
+          echo "Scanning commit range: $range"
+          echo "Upstream: origin/linux"
+
+          # Run patchscan, capture output; use PIPESTATUS to get patchscan's exit code, not tee's
+          set +e
+          set -o pipefail
+          python3 .github/scripts/patchscan \
+            "$range" \
+            origin \
+            linux \
+            --no-update \
+            2>&1 | tee patchscan_output.txt
+          exit_code=${PIPESTATUS[0]}
+          set +o pipefail
+          set -e
+
+          # Strip ANSI escape codes for the summary
+          sed 's/\x1B\[[0-9;]*[A-Za-z]//g; s/\x1B\]8;;[^\x1B]*\x1B\\//g; s/\x1B\]8;;[^\a]*\a//g' \
+            patchscan_output.txt > patchscan_clean.txt
+
+          # Classify the outcome:
+          # 1. "Fixes for" lines after "All fixes:" → missing fixes found
+          # 2. "All fixes:" with no entries         → no missing fixes
+          # 3. No "All fixes:" marker              → patchscan crashed before finishing
+          if awk '
+            /^All fixes:/ { in_all_fixes = 1; next }
+            in_all_fixes && /^Fixes for / { found = 1; exit 0 }
+            END { exit found ? 0 : 1 }
+          ' patchscan_clean.txt; then
+            echo "fixes_found=true" >> "$GITHUB_OUTPUT"
+          elif grep -q "^All fixes:" patchscan_clean.txt; then
+            echo "fixes_found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "fixes_found=error" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run validate-pr
         id: validate
+        env:
+          BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
         run: |
-          base_sha="${{ steps.pr.outputs.base_sha }}"
-          head_sha="${{ steps.pr.outputs.head_sha }}"
-          merge_base="$(git merge-base "$base_sha" "$head_sha")"
-          range="${merge_base}..${head_sha}"
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] ||
+             [[ ! "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Invalid PR SHA metadata"
+            exit 1
+          fi
+          if [[ ! "$BASE_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] ||
+             [[ "$BASE_REF" == *..* ]] ||
+             [[ "$BASE_REF" == */ ]] ||
+             [[ "$BASE_REF" == *.lock ]]; then
+            echo "::error::Invalid base ref metadata"
+            exit 1
+          fi
 
+          merge_base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          range="${merge_base}..${HEAD_SHA}"
           pr_title="$(cat pr_title.txt)"
-          base_ref="${{ steps.pr.outputs.base_ref }}"
 
           set +e
           set -o pipefail
@@ -128,7 +287,7 @@ jobs:
             --no-update \
             --pr-title "$pr_title" \
             --pr-body pr_body.txt \
-            --base-branch "$base_ref" \
+            --base-branch "$BASE_REF" \
             2>&1 | tee validate_output.txt
           exit_code=${PIPESTATUS[0]}
           set +o pipefail
@@ -138,16 +297,20 @@ jobs:
             validate_output.txt > validate_clean.txt
 
           if grep -qE "^E:" validate_clean.txt || [ $exit_code -ne 0 ]; then
-            echo "result=error" >> $GITHUB_OUTPUT
+            echo "result=error" >> "$GITHUB_OUTPUT"
           elif grep -qE "^W:" validate_clean.txt; then
-            echo "result=warn" >> $GITHUB_OUTPUT
+            echo "result=warn" >> "$GITHUB_OUTPUT"
           else
-            echo "result=pass" >> $GITHUB_OUTPUT
+            echo "result=pass" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Post unified PR Validation Report comment
         if: always() && steps.pr.outputs.pr_repo == github.repository
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
+        env:
+          PATCHSCAN_RESULT: ${{ steps.patchscan.outputs.fixes_found }}
+          VALIDATE_RESULT: ${{ steps.validate.outputs.result }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
         with:
           script: |
             const fs = require('fs');
@@ -163,9 +326,32 @@ jobs:
               const escaped = escapeHtml(truncateOutput(raw).trim());
               return '<details><summary>Details</summary>\n\n<pre>' + escaped + '</pre>\n\n</details>';
             };
+            const prNumber = Number.parseInt(process.env.PR_NUMBER || '', 10);
+            if (!Number.isSafeInteger(prNumber) || prNumber <= 0) {
+              throw new Error('Invalid PR number metadata');
+            }
+
+            // --- Patchscan section ---
+            const psResult = process.env.PATCHSCAN_RESULT || 'error';
+            let psIcon, psHeading, psBody;
+            if (psResult === 'false') {
+              psIcon = ':white_check_mark:';
+              psHeading = 'No Missing Fixes';
+              psBody = 'All cherry-picked commits checked — no missing upstream fixes found.';
+            } else if (psResult === 'true') {
+              psIcon = ':warning:';
+              psHeading = 'Missing Fixes Detected';
+              const raw = safeRead('patchscan_clean.txt');
+              psBody = 'The following upstream fix commits appear to be missing:\n\n' + renderDetails(raw);
+            } else {
+              psIcon = ':x:';
+              psHeading = 'Upstream Verification Error';
+              const raw = safeRead('patchscan_clean.txt');
+              psBody = 'Could not verify one or more commits (often a false positive for SAUCE commits).\n\n' + renderDetails(raw);
+            }
 
             // --- validate-pr section ---
-            const valResult = '${{ steps.validate.outputs.result }}' || 'error';
+            const valResult = process.env.VALIDATE_RESULT || 'error';
             let valIcon, valHeading, valBody;
             if (valResult === 'pass') {
               valIcon = ':white_check_mark:';
@@ -187,6 +373,9 @@ jobs:
             const body = [
               '## PR Validation Report',
               '',
+              `### Patchscan ${psIcon} ${psHeading}`,
+              psBody,
+              '',
               `### PR Lint ${valIcon} ${valHeading}`,
               valBody,
             ].join('\n');
@@ -194,7 +383,7 @@ jobs:
             const comments = await github.paginate(github.rest.issues.listComments, {
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: ${{ steps.pr.outputs.pr_number }},
+              issue_number: prNumber,
               per_page: 100,
             });
             const existing = comments.find(c =>
@@ -213,14 +402,23 @@ jobs:
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: ${{ steps.pr.outputs.pr_number }},
+                issue_number: prNumber,
                 body,
               });
             }
 
       - name: Fail on errors
-        if: steps.validate.outputs.result == 'error'
+        if: |
+          steps.patchscan.outputs.fixes_found == 'true' ||
+          steps.patchscan.outputs.fixes_found == 'error' ||
+          steps.validate.outputs.result == 'error'
+        env:
+          PATCHSCAN_RESULT: ${{ steps.patchscan.outputs.fixes_found }}
+          VALIDATE_RESULT: ${{ steps.validate.outputs.result }}
         run: |
-          val="${{ steps.validate.outputs.result }}"
+          ps="$PATCHSCAN_RESULT"
+          val="$VALIDATE_RESULT"
+          [ "$ps"  = "error" ] && echo "::error::Patchscan upstream verification error — see PR comment."
+          [ "$ps"  = "true"  ] && echo "::warning::Missing upstream fixes — see PR comment."
           [ "$val" = "error" ] && echo "::error::PR lint errors — see PR comment."
           exit 1
