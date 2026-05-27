@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 from argparse import ArgumentParser
+from collections import Counter
 from colorama import Fore
 import git
 import hashlib
@@ -73,6 +74,62 @@ def get_sob_lines(message):
     return re.findall(r'^Signed-off-by:.*$', message, re.MULTILINE)
 
 
+def get_sob_entries(message):
+    return [(m.start(), m.group()) for m in
+            re.finditer(r'^Signed-off-by:.*$', message, re.MULTILINE)]
+
+
+def missing_sob_lines(local_sobs, upstream_sobs):
+    local_counts = Counter(local_sobs)
+    missing = []
+    for sob in upstream_sobs:
+        if local_counts[sob]:
+            local_counts[sob] -= 1
+        else:
+            missing.append(sob)
+    return missing
+
+
+def added_sob_entries(message, upstream_sobs):
+    upstream_counts = Counter(upstream_sobs)
+    added = []
+    for pos, sob in get_sob_entries(message):
+        if upstream_counts[sob]:
+            upstream_counts[sob] -= 1
+        else:
+            added.append((pos, sob))
+    return added
+
+
+def get_local_provenance_entries(message):
+    entries = []
+    patterns = [
+        (r'^\[[\w][\w .\-]+:.*\]', '[Name: note]'),
+        (r'^\(cherry picked from commit [a-fA-F0-9]+\)',
+         '(cherry picked from commit ...)'),
+        (r'^\(backported from commit [a-fA-F0-9]+\)',
+         '(backported from commit ...)'),
+        (r'^\(backported from https?://[^\)]+\)', '(backported from ...)'),
+    ]
+    for pattern, label in patterns:
+        for m in re.finditer(pattern, message, re.MULTILINE):
+            entries.append((m.start(), label, m.group()))
+    return sorted(entries)
+
+
+def describe_added_sob_order(message, added):
+    entries = get_local_provenance_entries(message)
+    if not entries:
+        return None
+
+    last_pos, last_label, _ = entries[-1]
+    if not added:
+        return 'MISSING: no Signed-off-by after {}'.format(last_label)
+    if any(pos < last_pos for pos, _ in added):
+        return 'ORDER: move Signed-off-by after {}'.format(last_label)
+    return None
+
+
 def get_patch_id(commit):
     """Return the stable patch-ID string for a commit, or None on failure."""
     show = subprocess.run(
@@ -97,15 +154,18 @@ def describe_sob_chain(local_commit, upstream_commit):
     """Return a human-readable SoB chain status string."""
     local_sobs = get_sob_lines(local_commit.message)
     upstream_sobs = get_sob_lines(upstream_commit.message)
-    missing = [s for s in upstream_sobs if s not in local_sobs]
+    missing = missing_sob_lines(local_sobs, upstream_sobs)
     if missing:
         short = missing[0][len('Signed-off-by: '):].split('<')[0].strip()[:20]
         return "MISSING: {}".format(short)
-    added = [s for s in local_sobs if s not in upstream_sobs]
+    added = added_sob_entries(local_commit.message, upstream_sobs)
+    order = describe_added_sob_order(local_commit.message, added)
+    if order:
+        return order
     if not added:
         return "preserved"
     names = []
-    for s in added:
+    for _, s in added:
         m = re.match(r'Signed-off-by:\s+\S.*<([^@>]+)', s)
         names.append(m.group(1).split('.')[-1][:8] if m else '?')
     return "preserved + {} added".format(' '.join(names))
@@ -126,7 +186,7 @@ def describe_sob_simple(message):
 def describe_sob_chain_backport(message):
     """Check SOB ordering for a (backported from <url>) commit.
 
-    Correct order: original-author SOB(s), then (backported from ...), then
+    Correct order: original-author trailers, then (backported from ...), then
     optional [Name: note], then backporter SOB.  Returns a short status
     string; strings starting with 'MISSING' or 'ORDER' indicate an error.
     """
@@ -134,16 +194,12 @@ def describe_sob_chain_backport(message):
     if bp_match is None:
         return 'no backport tag'
     bp_pos = bp_match.start()
-    notes = [(m.start(), m.group()) for m in
-             re.finditer(r'^\[[\w][\w .\-]+:.*\]', message, re.MULTILINE)]
-    sobs = [(m.start(), m.group()) for m in
-            re.finditer(r'^Signed-off-by:.*$', message, re.MULTILINE)]
-    before = [s for pos, s in sobs if pos < bp_pos]
+    notes = [(pos, text) for pos, label, text in
+             get_local_provenance_entries(message) if label == '[Name: note]']
+    sobs = get_sob_entries(message)
     after  = [s for pos, s in sobs if pos > bp_pos]
-    if not before:
-        return 'MISSING: no SOB before (backported from)'
     if not after:
-        return 'MISSING: backporter SOB after (backported from)'
+        return 'MISSING: no Signed-off-by after (backported from ...)'
     first_backporter_sob_pos = min(pos for pos, _ in sobs if pos > bp_pos)
     if any(pos < bp_pos for pos, _ in notes):
         return ('ORDER: move [Name: note] after (backported from ...) and'
@@ -151,6 +207,11 @@ def describe_sob_chain_backport(message):
     if any(pos > first_backporter_sob_pos for pos, _ in notes):
         return ('ORDER: move [Name: note] before the backporter Signed-off-by'
                 ' and after (backported from ...)')
+    last_provenance_pos, last_provenance_label, _ = (
+        get_local_provenance_entries(message)[-1])
+    after = [s for pos, s in sobs if pos > last_provenance_pos]
+    if not after:
+        return 'MISSING: no Signed-off-by after {}'.format(last_provenance_label)
     names = []
     for s in after:
         m = re.match(r'Signed-off-by:\s+\S.*<([^@>]+)', s)
@@ -459,7 +520,7 @@ def build_digest(commits, repo, upstream_remote=None):
                 local_sha12, local_subj[:40], upstream_subj[:40]))
 
         sob_status = describe_sob_chain(commit, upstream)
-        sob_error  = sob_status.startswith('MISSING')
+        sob_error  = sob_status.startswith(('MISSING', 'ORDER'))
         if sob_error:
             errors.append("E: {} (\"{}\"): SoB chain problem: {}".format(
                 local_sha12, subject_of(commit)[:40], sob_status))
