@@ -3,8 +3,8 @@ name: Kernel Test
 on:
   workflow_dispatch:
     inputs:
-      branch:
-        description: 'Branch to build'
+      build_ref:
+        description: 'Ref to build'
         required: true
         type: choice
         options:
@@ -13,8 +13,8 @@ on:
           - linux-nvidia-6.18
   workflow_call:
     inputs:
-      branch:
-        description: 'Branch to build'
+      build_ref:
+        description: 'Ref to build'
         required: true
         type: string
 
@@ -32,10 +32,10 @@ jobs:
           - runs-on: ubuntu-24.04-arm
             config: config_64k
     steps:
-      - name: Checkout kernel branch
+      - name: Checkout kernel ref
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.branch }}
+          ref: ${{ inputs.build_ref }}
           fetch-depth: 0
 
       - name: Fetch config files from github-actions branch

@@ -60,9 +60,9 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     outputs:
-      branch-6-6: ${{ steps.mark-success.outputs.branch-6-6 }}
-      branch-6-12: ${{ steps.mark-success.outputs.branch-6-12 }}
-      branch-6-18: ${{ steps.mark-success.outputs.branch-6-18 }}
+      tag-6-6: ${{ steps.mark-success.outputs.tag-6-6 }}
+      tag-6-12: ${{ steps.mark-success.outputs.tag-6-12 }}
+      tag-6-18: ${{ steps.mark-success.outputs.tag-6-18 }}
     steps:
       - name: Check if already rebased to this tag
         id: check-tag
@@ -96,11 +96,6 @@ jobs:
           base=$(git merge-base HEAD ${{ matrix.tag }})
           echo "base=$base" >> $GITHUB_OUTPUT
 
-      - name: Create rebased branch
-        if: steps.check-tag.outputs.skip != 'true'
-        run: |
-          git checkout -B ${{ matrix.branch }}-next
-
       - name: Set git user identity
         if: steps.check-tag.outputs.skip != 'true'
         run: |
@@ -112,11 +107,6 @@ jobs:
         run: |
           git rebase --onto ${{ matrix.tag }} ${{ steps.merge_base.outputs.base }}
 
-      - name: Push rebased branch
-        if: steps.check-tag.outputs.skip != 'true'
-        run: |
-          git push --force origin HEAD:${{ matrix.branch }}-next
-
       - name: Create and push version tag
         if: steps.check-tag.outputs.skip != 'true'
         run: |
@@ -127,26 +117,26 @@ jobs:
         if: steps.check-tag.outputs.skip != 'true'
         id: mark-success
         run: |
-          key=$(echo "${{ matrix.branch }}" | sed 's/linux-nvidia-/branch-/' | tr '.' '-')
-          echo "${key}=${{ matrix.branch }}-next" >> $GITHUB_OUTPUT
+          key=$(echo "${{ matrix.branch }}" | sed 's/linux-nvidia-/tag-/' | tr '.' '-')
+          echo "${key}=${{ matrix.branch }}-${{ matrix.tag }}" >> $GITHUB_OUTPUT
 
   build-6-6:
     needs: [prepare, update-rebase-branch]
-    if: ${{ !cancelled() && needs.update-rebase-branch.outputs.branch-6-6 != '' }}
+    if: ${{ !cancelled() && needs.update-rebase-branch.outputs.tag-6-6 != '' }}
     uses: ./.github/workflows/kernel-build.yml
     with:
-      branch: ${{ needs.update-rebase-branch.outputs.branch-6-6 }}
+      build_ref: ${{ needs.update-rebase-branch.outputs.tag-6-6 }}
 
   build-6-12:
     needs: [prepare, update-rebase-branch]
-    if: ${{ !cancelled() && needs.update-rebase-branch.outputs.branch-6-12 != '' }}
+    if: ${{ !cancelled() && needs.update-rebase-branch.outputs.tag-6-12 != '' }}
     uses: ./.github/workflows/kernel-build.yml
     with:
-      branch: ${{ needs.update-rebase-branch.outputs.branch-6-12 }}
+      build_ref: ${{ needs.update-rebase-branch.outputs.tag-6-12 }}
 
   build-6-18:
     needs: [prepare, update-rebase-branch]
-    if: ${{ !cancelled() && needs.update-rebase-branch.outputs.branch-6-18 != '' }}
+    if: ${{ !cancelled() && needs.update-rebase-branch.outputs.tag-6-18 != '' }}
     uses: ./.github/workflows/kernel-build.yml
     with:
-      branch: ${{ needs.update-rebase-branch.outputs.branch-6-18 }}
+      build_ref: ${{ needs.update-rebase-branch.outputs.tag-6-18 }}
