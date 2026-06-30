@@ -20,7 +20,8 @@ class ValidatePrPatchIdTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.repo = pathlib.Path(self._tmp.name)
+        self.repo = pathlib.Path(self._tmp.name) / "repo"
+        self.repo.mkdir()
         self.real_git = shutil.which("git")
         self.assertIsNotNone(self.real_git)
 
@@ -39,6 +40,11 @@ class ValidatePrPatchIdTest(unittest.TestCase):
             "second-after",
         ])
         self.base = self._commit("fixture: base", LOCAL_SOB)
+
+    def _relocate_repo(self, name):
+        relocated = self.repo.parent / name
+        self.repo.rename(relocated)
+        self.repo = relocated
 
     def _git(self, *args, input_text=None):
         result = subprocess.run(
@@ -65,11 +71,32 @@ class ValidatePrPatchIdTest(unittest.TestCase):
     def _read_fixture(self):
         return (self.repo / "fixture.txt").read_text().splitlines()
 
+    def _use_identical_occurrence_fixture(self):
+        block = [
+            "same-before-4",
+            "same-before-3",
+            "same-before-2",
+            "same-before-1",
+            "anchor",
+            "same-after-1",
+            "same-after-2",
+            "same-after-3",
+            "same-after-4",
+        ]
+        separator = ["separator-{}".format(i) for i in range(1, 8)]
+        self._write_fixture(["prefix", *block, *separator, *block, "suffix"])
+        self.base = self._commit("fixture: duplicate context", LOCAL_SOB)
+
     def _commit(self, subject, body):
         self._git("add", "fixture.txt")
         self._git("commit", "-F", "-",
                   input_text="{}\n\n{}\n".format(subject, body))
         return self._git("rev-parse", "HEAD")
+
+    def _patch_id(self, commit):
+        patch = self._git("show", commit)
+        output = self._git("patch-id", "--stable", input_text=patch)
+        return output.split()[0]
 
     def _build_case(self, change, context_parent=True):
         self._git("checkout", "-b", "upstream-topic", self.base)
@@ -141,6 +168,15 @@ if (args[:2] == ["patch-id", "--stable"] and
             "a" * 40, "b" * 40, "c" * 40, "d" * 40))
         sys.exit(0)
 
+if (mode == "rev-parse-invalid-utf8" and
+        args[:3] == ["rev-parse", "--git-path", "objects"]):
+    sys.stdout.buffer.write(b"\\xff\\n")
+    sys.exit(0)
+
+if mode == "merge-tree-failure" and args and args[0] == "merge-tree":
+    sys.stderr.write("synthetic merge-tree failure\\n")
+    sys.exit(2)
+
 if mode == "merge-tree-extra-line" and args and args[0] == "merge-tree":
     result = subprocess.run([real_git, *args], capture_output=True)
     sys.stdout.buffer.write(result.stdout)
@@ -193,6 +229,15 @@ os.execv(real_git, [real_git, *args])
         self.assertEqual(result.returncode, 0, self._output(result))
         self.assertEqual(self._patch_id_status(result, local), "context")
 
+    def test_accepts_context_only_replay_with_colon_in_object_path(self):
+        self._relocate_repo("repo:colon")
+        parent, local = self._build_case("context")
+
+        result = self._validate(parent, local)
+
+        self.assertEqual(result.returncode, 0, self._output(result))
+        self.assertEqual(self._patch_id_status(result, local), "context")
+
     def test_accepts_exact_cherry_pick(self):
         parent, local = self._build_case("exact", context_parent=False)
 
@@ -225,6 +270,22 @@ os.execv(real_git, [real_git, *args])
         self.assertEqual(result.returncode, 1, self._output(result))
         self.assertIn("patch-ID mismatch with upstream", result.stdout)
 
+    def test_reports_replay_environment_failure(self):
+        parent, local = self._build_case("exact", context_parent=False)
+
+        result = self._validate(parent, local, "rev-parse-invalid-utf8")
+
+        self.assertEqual(result.returncode, 1, self._output(result))
+        self.assertIn("unable to verify patch replay", result.stderr)
+
+    def test_reports_merge_tree_failure(self):
+        parent, local = self._build_case("exact", context_parent=False)
+
+        result = self._validate(parent, local, "merge-tree-failure")
+
+        self.assertEqual(result.returncode, 1, self._output(result))
+        self.assertIn("synthetic merge-tree failure", result.stderr)
+
     def test_rejects_multiple_patch_id_output_lines(self):
         parent, local = self._build_case("exact", context_parent=False)
 
@@ -244,6 +305,18 @@ os.execv(real_git, [real_git, *args])
     def test_rejects_same_change_at_different_occurrence(self):
         parent, local = self._build_case("wrong-occurrence")
 
+        result = self._validate(parent, local)
+
+        self.assertEqual(result.returncode, 1, self._output(result))
+        self.assertIn("patch-ID mismatch with upstream", result.stdout)
+
+    def test_rejects_equal_patch_id_at_different_occurrence(self):
+        self._use_identical_occurrence_fixture()
+        parent, local = self._build_case(
+            "wrong-occurrence", context_parent=False)
+        upstream = self._git("rev-parse", "refs/remotes/upstream/linux")
+
+        self.assertEqual(self._patch_id(local), self._patch_id(upstream))
         result = self._validate(parent, local)
 
         self.assertEqual(result.returncode, 1, self._output(result))
