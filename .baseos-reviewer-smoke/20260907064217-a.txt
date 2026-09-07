@@ -1,0 +1,2 @@
+Temporary BaseOS Reviewer watcher smoke fixture A.
+Created 20260907064217 UTC.
