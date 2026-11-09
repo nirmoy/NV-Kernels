@@ -313,6 +313,82 @@ os.execv(real_git, [real_git, *args])
         self.fail("no digest row for {}:\n{}".format(
             local[:12], self._output(result)))
 
+    def _build_annotated_backport_case(self):
+        parent, local, upstream = self._build_duplicate_context_conflict_case()
+        message = self._git("log", "-1", "--format=%B").replace(
+            "(cherry picked from commit {})".format(upstream),
+            "(backported from commit {})\n"
+            "[local: adjusted for divergent neighboring code]".format(upstream))
+        self._git("commit", "--amend", "-F", "-", input_text=message)
+        return parent, self._git("rev-parse", "HEAD"), upstream
+
+    def test_accepts_annotated_sha_backport_with_unprovable_placement(self):
+        parent, local, upstream = self._build_annotated_backport_case()
+        self.assertNotEqual(self._patch_id(local), self._patch_id(upstream))
+        self.assertEqual(self._patch_id(local, zero_context=True),
+                         self._patch_id(upstream, zero_context=True))
+        self.assertTrue(self._merge_tree_conflicts(parent, local, upstream))
+
+        result = self._validate(parent, local)
+
+        self.assertEqual(result.returncode, 0, self._output(result))
+        self.assertEqual(self._patch_id_status(result, local), "noted")
+
+    def test_rejects_unannotated_sha_backport_with_unprovable_placement(self):
+        parent, local, _upstream = self._build_annotated_backport_case()
+        message = self._git("log", "-1", "--format=%B").replace(
+            "[local: adjusted for divergent neighboring code]\n", "")
+        self._git("commit", "--amend", "-F", "-", input_text=message)
+        result = self._validate(parent, self._git("rev-parse", "HEAD"))
+        self.assertEqual(result.returncode, 1, self._output(result))
+        self.assertIn("patch-ID mismatch with upstream", result.stdout)
+
+    def test_rejects_annotated_cherry_pick_with_unprovable_placement(self):
+        parent, local, _upstream = self._build_annotated_backport_case()
+        message = self._git("log", "-1", "--format=%B").replace(
+            "(backported from commit ", "(cherry picked from commit ")
+        self._git("commit", "--amend", "-F", "-", input_text=message)
+        result = self._validate(parent, self._git("rev-parse", "HEAD"))
+        self.assertEqual(result.returncode, 1, self._output(result))
+        self.assertIn("patch-ID mismatch with upstream", result.stdout)
+
+    def test_annotated_sha_backport_does_not_bypass_invalid_patch_id(self):
+        parent, local, _upstream = self._build_annotated_backport_case()
+        result = self._validate(parent, local, "patch-id-malformed")
+        self.assertEqual(result.returncode, 1, self._output(result))
+        self.assertIn("patch-ID mismatch with upstream", result.stdout)
+
+    def test_annotated_sha_backport_does_not_bypass_unresolved_sha(self):
+        parent, local, upstream = self._build_annotated_backport_case()
+        message = self._git("log", "-1", "--format=%B").replace(
+            upstream, "deadbeef" * 5)
+        self._git("commit", "--amend", "-F", "-", input_text=message)
+        result = self._validate(parent, self._git("rev-parse", "HEAD"))
+        self.assertEqual(result.returncode, 1, self._output(result))
+        self.assertIn("cannot resolve upstream SHA", result.stdout)
+
+    def test_annotated_sha_backport_does_not_bypass_subject_check(self):
+        parent, local, _upstream = self._build_annotated_backport_case()
+        message = self._git("log", "-1", "--format=%B").replace(
+            SUBJECT, "fixture: different subject", 1)
+        self._git("commit", "--amend", "-F", "-", input_text=message)
+        local = self._git("rev-parse", "HEAD")
+        result = self._validate(parent, local)
+        self.assertEqual(result.returncode, 1, self._output(result))
+        self.assertEqual(self._patch_id_status(result, local), "noted")
+        self.assertIn("subject differs from upstream", result.stdout)
+
+    def test_annotated_sha_backport_does_not_bypass_sob_check(self):
+        parent, local, _upstream = self._build_annotated_backport_case()
+        message = self._git("log", "-1", "--format=%B").replace(
+            UPSTREAM_SOB + "\n", "")
+        self._git("commit", "--amend", "-F", "-", input_text=message)
+        local = self._git("rev-parse", "HEAD")
+        result = self._validate(parent, local)
+        self.assertEqual(result.returncode, 1, self._output(result))
+        self.assertEqual(self._patch_id_status(result, local), "noted")
+        self.assertIn("SoB chain problem", result.stdout)
+
     def test_accepts_context_only_replay(self):
         parent, local = self._build_case("context")
 

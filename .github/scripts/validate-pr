@@ -795,6 +795,12 @@ def build_digest(commits, repo, upstream_remote=None):
                 commit, upstream, local_pid, upstream_pid):
             pid_status = 'match' if patch_ids_match else 'context'
             pid_error  = False
+        elif (local_pid and upstream_pid and
+              get_backported_commit_sha(commit.message) and
+              has_conflict_annotation(commit.message)):
+            # Intentional backports may need edits that cannot replay cleanly.
+            pid_status = 'noted'
+            pid_error  = False
         else:
             pid_status = 'MISMATCH'
             pid_error  = True
